@@ -1,0 +1,199 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+code,
+pre {
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--foreground) 15%, transparent);
+}
+
+@keyframes loader {
+  0% {
+    transform: translateX(-60%);
+  }
+  50% {
+    transform: translateX(60%);
+  }
+  100% {
+    transform: translateX(160%);
+  }
+}
+
+@keyframes ambientBlobs {
+  0% {
+    transform: translate3d(-8%, -6%, 0) rotate(0deg) scale(1.05);
+  }
+  33% {
+    transform: translate3d(10%, 4%, 0) rotate(8deg) scale(1.12);
+  }
+  66% {
+    transform: translate3d(4%, 12%, 0) rotate(-6deg) scale(1.08);
+  }
+  100% {
+    transform: translate3d(-8%, -6%, 0) rotate(0deg) scale(1.05);
+  }
+}
+
+@keyframes auroraRotate {
+  from {
+    transform: rotate(0deg) scale(1.15);
+  }
+  to {
+    transform: rotate(360deg) scale(1.15);
+  }
+}
+
+@keyframes scanPulse {
+  0%,
+  100% {
+    opacity: 0.03;
+  }
+  50% {
+    opacity: 0.06;
+  }
+}
+
+.bg-ambient {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(1200px 800px at 10% 15%, color-mix(in oklab, #64748b 14%, transparent), transparent 58%),
+    radial-gradient(1000px 700px at 92% 18%, color-mix(in oklab, #6366f1 10%, transparent), transparent 62%),
+    radial-gradient(900px 700px at 48% 95%, color-mix(in oklab, #0d9488 8%, transparent), transparent 64%),
+    linear-gradient(165deg, #f4f4f5 0%, #fafafa 55%, #f1f5f9 100%);
+}
+
+.bg-ambient::before {
+  content: "";
+  position: absolute;
+  inset: -25%;
+  background:
+    radial-gradient(closest-side at 25% 35%, color-mix(in oklab, #64748b 18%, transparent), transparent 76%),
+    radial-gradient(closest-side at 78% 25%, color-mix(in oklab, #6366f1 14%, transparent), transparent 74%),
+    radial-gradient(closest-side at 55% 88%, color-mix(in oklab, #0d9488 12%, transparent), transparent 76%),
+    radial-gradient(closest-side at 8% 80%, color-mix(in oklab, #94a3b8 10%, transparent), transparent 78%);
+  filter: blur(64px);
+  opacity: 0.52;
+  animation: ambientBlobs 22s ease-in-out infinite;
+  will-change: transform;
+}
+
+.bg-ambient::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, #18181b 10%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, #18181b 10%, transparent) 1px, transparent 1px),
+    linear-gradient(
+      115deg,
+      transparent 0%,
+      color-mix(in oklab, #ffffff 22%, transparent) 45%,
+      transparent 52%
+    );
+  background-size:
+    56px 56px,
+    56px 56px,
+    200% 200%;
+  background-position:
+    0 0,
+    0 0,
+    0 0;
+  opacity: 0.08;
+  mix-blend-mode: multiply;
+  animation: scanPulse 10s ease-in-out infinite;
+}
+
+.bg-ambient-aurora {
+  position: absolute;
+  inset: -50%;
+  background: conic-gradient(
+    from 210deg at 50% 50%,
+    color-mix(in oklab, #64748b 9%, transparent),
+    color-mix(in oklab, #6366f1 8%, transparent),
+    color-mix(in oklab, #475569 7%, transparent),
+    color-mix(in oklab, #0d9488 7%, transparent),
+    color-mix(in oklab, #64748b 8%, transparent),
+    color-mix(in oklab, #64748b 9%, transparent)
+  );
+  opacity: 0.14;
+  filter: blur(88px);
+  animation: auroraRotate 48s linear infinite;
+  will-change: transform;
+}
+
+@media (prefers-color-scheme: dark) {
+  .bg-ambient {
+    background:
+      radial-gradient(1200px 800px at 10% 15%, color-mix(in oklab, #38bdf8 10%, transparent), transparent 64%),
+      radial-gradient(1000px 700px at 92% 18%, color-mix(in oklab, #818cf8 9%, transparent), transparent 66%),
+      radial-gradient(900px 700px at 48% 95%, color-mix(in oklab, #14b8a6 7%, transparent), transparent 68%),
+      linear-gradient(165deg, #0a0a0a 0%, #0b0b10 50%, #0a0f12 100%);
+  }
+
+  .bg-ambient::before {
+    opacity: 0.42;
+    filter: blur(72px);
+  }
+
+  .bg-ambient::after {
+    opacity: 0.1;
+    mix-blend-mode: screen;
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, #fafafa 8%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, #fafafa 8%, transparent) 1px, transparent 1px),
+      linear-gradient(
+        115deg,
+        transparent 0%,
+        color-mix(in oklab, #ffffff 8%, transparent) 45%,
+        transparent 52%
+      );
+  }
+
+  .bg-ambient-aurora {
+    opacity: 0.1;
+    filter: blur(96px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-ambient::before,
+  .bg-ambient::after,
+  .bg-ambient-aurora {
+    animation: none;
+  }
+
+  .bg-ambient-aurora {
+    opacity: 0.08;
+    transform: none;
+  }
+}
