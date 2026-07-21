@@ -35,6 +35,8 @@ web/.data/
 # --- Raw / test data dumps (not needed in repo) ---
 input/
 sample/
+sample_copy/
+sample_original/
 *.pptx
 *.zip
 
