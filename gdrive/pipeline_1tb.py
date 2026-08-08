@@ -410,6 +410,37 @@ def _run_classify_pass(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _drive_service_for_row(
+    row: dict[str, Any],
+    *,
+    default_service: Any,
+    creds: Any = None,
+    get_user_credentials: Callable[[str], Any] | None = None,
+) -> Any:
+    """Return a Drive service that can read ``row`` (per-user DWD when stamped)."""
+    email = str(row.get("impersonate_as") or "").strip()
+    if get_user_credentials and email:
+        # Thread-local cache keyed by impersonated user (parallel extract workers).
+        by_user = getattr(_tl, "by_user", None)
+        if by_user is None:
+            by_user = {}
+            _tl.by_user = by_user
+        svc = by_user.get(email)
+        if svc is None:
+            from gdrive.credentials import build_drive_service
+            svc = build_drive_service(get_user_credentials(email))
+            by_user[email] = svc
+        return svc
+    if default_service is not None:
+        return default_service
+    if creds is None:
+        raise ValueError("no Drive service/credentials available for extract")
+    if not hasattr(_tl, "service"):
+        from gdrive.credentials import build_drive_service
+        _tl.service = build_drive_service(creds)
+    return _tl.service
+
+
 def _extract_one(
     aid: int,
     row: dict[str, Any],
@@ -417,12 +448,12 @@ def _extract_one(
     td_path: Path,
     snippet_export_bytes: int,
     arti_path: Path,
+    get_user_credentials: Callable[[str], Any] | None = None,
 ) -> tuple[int, dict[str, Any], dict[str, Any]]:
     """Download + extract one file. Thread-safe. Returns (aid, ev, pend)."""
-    if not hasattr(_tl, "service"):
-        from gdrive.credentials import build_drive_service
-        _tl.service = build_drive_service(creds)
-    svc = _tl.service
+    svc = _drive_service_for_row(
+        row, default_service=None, creds=creds, get_user_credentials=get_user_credentials,
+    )
 
     rel_path = str(row.get("path") or "").replace("\\", "/")
     filename = str(row.get("name") or "")
@@ -517,6 +548,9 @@ def build_inventory_from_drive_1tb(
     # Parallel extract workers (needs creds to create per-thread services)
     workers: int = 1,
     creds: Any = None,
+    # Domain-Wide Delegation: callable(email) -> credentials for that user's My Drive.
+    # Required when scan_rows include ``impersonate_as`` (multi-user workspace scans).
+    get_user_credentials: Callable[[str], Any] | None = None,
 ) -> str:
     """1TB-scale Drive inventory pipeline.
 
@@ -600,7 +634,16 @@ def build_inventory_from_drive_1tb(
             done_count = 0
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 futs = {
-                    ex.submit(_extract_one, aid, row, creds, td_path, snippet_export_bytes, arti_path): aid
+                    ex.submit(
+                        _extract_one,
+                        aid,
+                        row,
+                        creds,
+                        td_path,
+                        snippet_export_bytes,
+                        arti_path,
+                        get_user_credentials,
+                    ): aid
                     for aid, row in new_file_rows
                 }
                 for fut in as_completed(futs):
@@ -637,8 +680,14 @@ def build_inventory_from_drive_1tb(
                 rel_path = str(row.get("path") or "").replace("\\", "/")
                 filename = str(row.get("name") or "")
                 size_b = _int_size(row.get("size_bytes"))
+                svc = _drive_service_for_row(
+                    row,
+                    default_service=service,
+                    creds=creds,
+                    get_user_credentials=get_user_credentials,
+                )
 
-                fid, mime, display_name, err0 = _effective_file_for_row(service, row)
+                fid, mime, display_name, err0 = _effective_file_for_row(svc, row)
 
                 if err0:
                     ev, pend = _metadata_only_evidence(
@@ -669,7 +718,7 @@ def build_inventory_from_drive_1tb(
                     suffix = suggested_local_suffix(mime or "", display_name or filename)
                     tmp = td_path / f"a{aid}{suffix}"
                     err = fetch_drive_file_to_path(
-                        service,
+                        svc,
                         file_id=fid,
                         mime_type=mime or "",
                         display_name=display_name or filename,

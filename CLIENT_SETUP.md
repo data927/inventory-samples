@@ -143,7 +143,7 @@ Skip this part if you are only scanning a **local folder** on your computer. Jum
 
 > **Which setup do you need?**
 > - **Single folder or Shared Drive only** → follow Part 4A (OAuth, quick setup)
-> - **All users' My Drives across the whole organisation** → follow Part 4B (Service Account)
+> - **All users' My Drives, or a selected list of user emails** → follow Part 4B (Service Account)
 
 ### Part 4A — OAuth (single folder / Shared Drive)
 
@@ -192,9 +192,15 @@ When the browser shows a success message, return to the terminal. You will see:
 
 ---
 
-### Part 4B — Service Account with Domain-Wide Delegation (all users' My Drives)
+### Part 4B — Service Account with Domain-Wide Delegation (admin / workspace scan)
 
-This is only needed if you want to scan **every user's personal My Drive** in the Google Workspace, not just Shared Drives.
+This is needed if you want to scan **users' personal My Drives** in the Google Workspace — either **everyone in the domain**, or **a selected list of email addresses**.
+
+> **Important — why “sign in as admin” with OAuth is not enough**
+>
+> Logging into Google as a Workspace admin (Part 4A) only grants access to **that admin’s own Drive** and Shared Drives they can see. It cannot open other employees’ private My Drives.
+>
+> Scanning other users requires a **Service Account + Domain-Wide Delegation** (this section). The tool then impersonates each selected user to both *list* and *download* their files. Without DWD set up correctly, scans fail or return empty / permission errors.
 
 **One-time admin setup (~10 minutes):**
 
@@ -208,18 +214,22 @@ This is only needed if you want to scan **every user's personal My Drive** in th
 2. **Enable Domain-Wide Delegation on the service account**
    - Still on the service account page → **Details** tab
    - Expand **Advanced settings** → copy the **Client ID** (a long number)
+   - Turn on **Domain-wide delegation** if there is a checkbox for it
 
 3. **Authorise the scopes in Google Workspace Admin**
    - Go to [admin.google.com](https://admin.google.com) → Security → Access and data control → **API controls**
    - Click **Manage Domain Wide Delegation** → **Add new**
-   - Paste the Client ID and add these two scopes (comma-separated):
+   - Paste the Client ID and add these two scopes (comma-separated, no spaces after the comma is fine):
      ```
      https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly
      ```
    - Click **Authorise**.
+   - Propagation can take a few minutes. If the first run fails with `unauthorized_client` or `access_denied`, wait 5–10 minutes and retry.
 
-4. **Enable the Admin SDK API in Cloud Console**
-   - Cloud Console → APIs & Services → Library → search **Admin SDK API** → **Enable**
+4. **Enable the APIs in Cloud Console**
+   - Cloud Console → APIs & Services → Library
+   - Enable **Google Drive API**
+   - Enable **Admin SDK API**
 
 **Step 9B — Run the setup wizard:**
 
@@ -228,19 +238,62 @@ python setup.py
 ```
 
 When it asks `Set up Service Account for full workspace scan? (y/n)`, type `y`.
-Paste the path to the service account JSON file and your super-admin email when prompted.
+Paste the path to the service account JSON file and your **super-admin** email when prompted (must be a real Workspace user, e.g. `admin@yourdomain.com` — not the service account email).
 
-**Run command for full workspace scan:**
+The service account path and admin email are read from `.env` automatically (set by the wizard). You can also pass them explicitly with `--service-account` and `--admin-email` as shown below.
+
+**Smoke test (recommended before a full run):**
+
+Scan one known user with a small file cap. You should see `My Drive → that@user.com` and file counts increasing — not a wall of `WARNING: skipping` / `403` / `unauthorized_client`.
+
+```
+python run_drive.py --users alice@yourdomain.com --max-files 20 --out out/sa_smoke.xlsx
+```
+
+**Run — full workspace (every user + Shared Drives):**
 
 ```
 python run_drive.py --all-drives --out out/workspace_inventory.xlsx
 ```
 
-The service account path and admin email are read from `.env` automatically (set by the wizard). You can also pass them explicitly:
+Or with paths passed explicitly:
 
 ```
 python run_drive.py --all-drives --service-account ~/Downloads/service_account.json --admin-email admin@yourdomain.com --out out/workspace_inventory.xlsx
 ```
+
+**Run — selected users only (N My Drives):**
+
+List any number of Workspace emails after `--users` (spaces or commas both work). Only those users' My Drives are scanned — not the whole domain.
+
+```
+python run_drive.py --users alice@yourdomain.com bob@yourdomain.com carol@yourdomain.com --out out/selected_inventory.xlsx
+```
+
+Or comma-separated:
+
+```
+python run_drive.py --users alice@yourdomain.com,bob@yourdomain.com,carol@yourdomain.com --out out/selected_inventory.xlsx
+```
+
+**Run — selected users + Shared Drives:**
+
+Add `--all-drives` together with `--users`. Shared Drives are included; My Drive scanning is limited to the emails you listed.
+
+```
+python run_drive.py --all-drives --users alice@yourdomain.com bob@yourdomain.com --out out/selected_inventory.xlsx
+```
+
+> `--users` requires the service account setup above. If a listed email is wrong or cannot be impersonated, that user is skipped with a warning and the rest continue.
+
+**If it still fails — checklist:**
+
+| Symptom | Likely cause |
+| --- | --- |
+| `unauthorized_client` / `Client is unauthorized to retrieve access tokens` | Client ID not added under Admin → Domain-Wide Delegation, or scopes don’t match exactly |
+| `Not Authorized to access this resource` on Admin SDK | Admin SDK API not enabled, or `--admin-email` is not a super-admin / real user |
+| Files listed but content empty / many `empty_download` | Old bug path — update to latest code (downloads must impersonate each user) |
+| Works for admin email only, not other users | DWD missing or scopes wrong; OAuth-only setup cannot read other My Drives |
 
 ---
 
@@ -264,15 +317,37 @@ python run_dump.py --dump C:\Users\YourName\Downloads\company-files --out out\in
 
 ---
 
-### Option B — Scan your entire Google Drive / Workspace
+### Option B — Scan Google Drive / Workspace
 
-**Step 10 — Scan all drives:**
+Pick the command that matches what you want to inventory.
+
+**B1 — All Shared Drives + signed-in My Drive (OAuth, Part 4A):**
 
 ```
 python run_drive.py --all-drives --out out/drive_inventory.xlsx
 ```
 
-**Option B2 — Scan a specific folder only:**
+**B2 — Full organisation (every user's My Drive + Shared Drives — Part 4B):**
+
+```
+python run_drive.py --all-drives --out out/workspace_inventory.xlsx
+```
+
+**B3 — Selected users' My Drives only (Part 4B):**
+
+Replace the example emails with the Workspace accounts you want to scan. You can list as many as you need.
+
+```
+python run_drive.py --users alice@yourdomain.com bob@yourdomain.com --out out/selected_inventory.xlsx
+```
+
+**B4 — Selected users' My Drives + Shared Drives (Part 4B):**
+
+```
+python run_drive.py --all-drives --users alice@yourdomain.com bob@yourdomain.com --out out/selected_inventory.xlsx
+```
+
+**B5 — A specific folder only:**
 
 ```
 python run_drive.py --folder-id "https://drive.google.com/drive/folders/PASTE_FOLDER_URL_HERE" --out out/drive_inventory.xlsx

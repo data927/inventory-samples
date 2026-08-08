@@ -84,6 +84,18 @@ Scan your entire Google Workspace (My Drive + all Shared Drives):
 python run_drive.py --all-drives --out out/drive_inventory.xlsx
 ```
 
+Scan only selected users' My Drives (service account + Domain-Wide Delegation required):
+
+```bash
+python run_drive.py \
+  --users alice@yourdomain.com bob@yourdomain.com \
+  --service-account .secrets/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --out out/selected_inventory.xlsx
+```
+
+Add `--all-drives` with `--users` to include Shared Drives while still limiting My Drive scans to those emails.
+
 Or scan a specific folder only:
 
 ```bash
@@ -96,7 +108,10 @@ python run_drive.py \
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--all-drives` | off | Scan My Drive + every Shared Drive |
-| `--folder-id` | `root` | Drive folder ID or full URL (ignored when `--all-drives` is set) |
+| `--users` | *(none)* | Space- or comma-separated emails — scan only those My Drives (requires `--service-account`) |
+| `--folder-id` | `root` | Drive folder ID or full URL (ignored when `--all-drives` / `--users` is set) |
+| `--service-account` | from `.env` | Service account JSON for Domain-Wide Delegation |
+| `--admin-email` | from `.env` | Super-admin email to impersonate with the service account |
 | `--out` | `out/drive_1tb_inventory.xlsx` | Output `.xlsx` path |
 | `--workers` | `8` | Parallel download workers |
 | `--max-files` | `0` (unlimited) | Cap file count for testing |

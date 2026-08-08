@@ -306,6 +306,7 @@ def main() -> None:
     _print("  Google Drive:     python run_drive.py --out out/inventory.xlsx")
     _print("  Shared Drives:    python run_drive.py --all-drives --out out/inventory.xlsx")
     _print("  Full workspace:   python run_drive.py --all-drives --service-account .secrets/service_account.json --admin-email admin@yourdomain.com --out out/inventory.xlsx")
+    _print("  Selected users:   python run_drive.py --users a@co.com b@co.com --service-account .secrets/service_account.json --admin-email admin@yourdomain.com --out out/inventory.xlsx")
     _print("  Gmail (OAuth):    python run_gmail.py --out out/gmail_inventory.xlsx")
     _print("  Gmail (all users): python run_gmail.py --all-users --out out/workspace_gmail_inventory.xlsx")
     _print("=" * 60)

@@ -301,6 +301,10 @@ def walk_all_user_my_drives(
                 progress_every=progress_every,
                 scan_cache_path=user_cache,
             )
+            # Downloads must impersonate this same user — admin creds cannot read
+            # private My Drive files. Stamp even when rows came from scan cache.
+            for r in rows:
+                r["impersonate_as"] = email
             all_rows.extend(rows)
             if remaining is not None:
                 remaining = max(0, remaining - len(rows))

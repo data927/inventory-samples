@@ -40,11 +40,40 @@ def _log(msg: str) -> None:
     print(line, flush=True)
 
 
+def _parse_users(raw: list[str] | None) -> list[str]:
+    """Flatten space- and/or comma-separated emails, preserve order, drop dupes."""
+    if not raw:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        for part in item.split(","):
+            email = part.strip()
+            if not email:
+                continue
+            key = email.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(email)
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser()
     g = p.add_mutually_exclusive_group()
     g.add_argument("--folder-id", default="root", help="Drive folder ID or URL (default: My Drive root)")
     g.add_argument("--all-drives", action="store_true", help="Scan entire Google Workspace: My Drive + all Shared Drives")
+    p.add_argument(
+        "--users",
+        nargs="+",
+        metavar="EMAIL",
+        help=(
+            "Scan only these users' My Drives (requires --service-account). "
+            "Accepts space- or comma-separated emails. "
+            "With --all-drives, also includes Shared Drives; without it, My Drives only."
+        ),
+    )
     p.add_argument("--out", default="out/drive_1tb_inventory.xlsx", help="Output .xlsx path")
     p.add_argument("--pass1-model", default="", help="Fast model for pass 1 (default: haiku/gpt-4o-mini)")
     p.add_argument("--pass2-model", default=default_llm_model(), help="Full model for pass 2")
@@ -62,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     out_path = str((_ROOT / args.out).resolve())
     scan_cache = str(Path(out_path).with_name(Path(out_path).stem + ".scan_cache.jsonl"))
     max_files = None if args.max_files == 0 else args.max_files
+    selected_users = _parse_users(args.users)
 
     use_sa = bool(args.service_account)
 
@@ -87,7 +117,37 @@ def main(argv: list[str] | None = None) -> int:
         )
         service = build_drive_service(creds)
 
-    if args.all_drives:
+    if selected_users:
+        if not use_sa:
+            print("ERROR: --users requires --service-account (Domain-Wide Delegation)", flush=True)
+            return 1
+        users = selected_users
+        _log(f"[workspace] scanning {len(users)} selected user(s): {', '.join(users)}")
+
+        shared = None
+        if args.all_drives:
+            shared = list_shared_drives(service, use_domain_admin_access=True)
+            _log(f"[workspace] {len(shared)} Shared Drive(s)")
+            for d in shared:
+                _log(f"  shared drive: {d.get('name')!r} ({d['id']})")
+        _log(f"out={out_path} workers={args.workers}")
+
+        def _user_service(email: str):
+            u_creds = get_service_account_credentials(sa_file, email, SCOPES_READONLY)
+            return build_drive_service(u_creds)
+
+        scan_rows = walk_all_user_my_drives(
+            _user_service,
+            users,
+            shared_drives=shared,
+            shared_drive_service=service if shared else None,
+            max_files=max_files,
+            progress_log=_log,
+            scan_cache_path=scan_cache,
+        )
+        _log(f"walk complete: {len(scan_rows)} files")
+        folder_id = None
+    elif args.all_drives:
         if use_sa:
             # Full workspace: enumerate every user via Admin SDK, scan their My Drive
             admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
@@ -140,6 +200,11 @@ def main(argv: list[str] | None = None) -> int:
     _log(f"pass1_model={args.pass1_model or '(auto)'} pass2_model={args.pass2_model}")
     _log(f"snippet_bytes={args.snippet_bytes} max_files={max_files}")
 
+    get_user_creds = None
+    if use_sa:
+        def get_user_creds(email: str):
+            return get_service_account_credentials(sa_file, email, SCOPES_READONLY)
+
     t0 = time.time()
     result = build_inventory_from_drive_1tb(
         service=service,
@@ -156,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         workers=args.workers,
         creds=creds,
         scan_rows=scan_rows,
+        get_user_credentials=get_user_creds,
     )
 
     elapsed = time.time() - t0
