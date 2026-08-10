@@ -37,6 +37,12 @@ def get_attachment_bytes(
     return _b64_decode(resp.get("data") or "")
 
 
+def fetch_thread_raw(service, thread_id: str, user_id: str = "me") -> list[bytes]:
+    """Raw RFC822 bytes for every message in a thread, in order."""
+    resp = service.users().threads().get(userId=user_id, id=thread_id, format="raw").execute()
+    return [_b64_decode(m["raw"]) for m in resp.get("messages", []) if m.get("raw")]
+
+
 def fetch_attachment_to_tempfile(
     service,
     message_id: str,

@@ -138,6 +138,20 @@ def fetch_message(service, message_id: str, user_id: str = "me") -> dict[str, An
     }
 
 
+def fetch_message_meta(service, message_id: str, user_id: str = "me") -> dict[str, Any]:
+    """Cheap per-message metadata: size + thread id, no body/attachment parsing."""
+    msg = service.users().messages().get(
+        userId=user_id, id=message_id, format="metadata", metadataHeaders=["Subject"],
+    ).execute()
+    headers = (msg.get("payload") or {}).get("headers") or []
+    return {
+        "message_id": msg.get("id") or "",
+        "thread_id": msg.get("threadId") or "",
+        "subject": _get_header(headers, "Subject") or "(no subject)",
+        "size_bytes": int(msg.get("sizeEstimate") or 0),
+    }
+
+
 def list_message_ids(
     service,
     user_id: str = "me",

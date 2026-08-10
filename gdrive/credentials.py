@@ -18,6 +18,7 @@ SCOPES_METADATA = ("https://www.googleapis.com/auth/drive.metadata.readonly",)
 SCOPES_READONLY = ("https://www.googleapis.com/auth/drive.readonly",)
 SCOPES_ADMIN_USERS = ("https://www.googleapis.com/auth/admin.directory.user.readonly",)
 SCOPES_GMAIL = ("https://www.googleapis.com/auth/gmail.readonly",)
+SCOPES_GMAIL_INSERT = ("https://www.googleapis.com/auth/gmail.insert",)
 
 
 def default_service_account_path() -> Path | None:
