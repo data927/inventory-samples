@@ -260,12 +260,16 @@ def _bucket_drive_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, A
 
 
 def collect_drive_candidates_workspace(
-    *, sa_file: Path, admin_email: str, scan_cache: str, users: list[str] | None = None, progress_log=_log,
+    *, sa_file: Path, admin_email: str, scan_cache: str, users: list[str] | None = None,
+    modified_before: str | None = None, progress_log=_log,
 ) -> dict[str, list[dict[str, Any]]]:
     """Every user's My Drive + every Shared Drive (Domain-Wide Delegation).
 
     ``users``, if given, restricts the scan to those emails and skips the Admin SDK
     enumeration call entirely (so ``--users`` mode doesn't even need Admin SDK access).
+
+    ``modified_before`` (RFC3339), if given, excludes files modified on or after it —
+    folders are still always traversed regardless of their own modified time.
     """
     if users is None:
         admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
@@ -289,6 +293,7 @@ def collect_drive_candidates_workspace(
         users,
         shared_drives=shared,
         shared_drive_service=admin_drive_svc,
+        modified_before=modified_before,
         progress_log=progress_log,
         scan_cache_path=scan_cache,
     )
@@ -296,7 +301,9 @@ def collect_drive_candidates_workspace(
     return _bucket_drive_rows(rows)
 
 
-def collect_drive_candidates_single(*, service, scan_cache: str, progress_log=_log) -> dict[str, list[dict[str, Any]]]:
+def collect_drive_candidates_single(
+    *, service, scan_cache: str, modified_before: str | None = None, progress_log=_log,
+) -> dict[str, list[dict[str, Any]]]:
     """Just the signed-in account's own My Drive + Shared Drives it can see."""
     shared = list_shared_drives(service)
     progress_log(f"[drive] {len(shared)} Shared Drive(s) visible to this account")
@@ -304,6 +311,7 @@ def collect_drive_candidates_single(*, service, scan_cache: str, progress_log=_l
         service,
         include_my_drive=True,
         include_shared_drives=True,
+        modified_before=modified_before,
         progress_log=progress_log,
         scan_cache_path=scan_cache,
     )
@@ -331,12 +339,13 @@ def collect_gmail_candidates(
     users: list[str],
     gmail_query: str,
     scan_cache_dir: Path,
+    cache_suffix: str = "",
     progress_log=_log,
 ) -> list[dict[str, Any]]:
     by_thread: dict[tuple[str, str], dict[str, Any]] = {}
     for email in users:
         svc = get_user_service(email)
-        cache_path = scan_cache_dir / f"gmail_ids__{email.replace('@', '_at_')}.txt"
+        cache_path = scan_cache_dir / f"gmail_ids__{email.replace('@', '_at_')}{cache_suffix}.txt"
         ids = scan_mailbox(
             svc, email, query=gmail_query, progress_log=progress_log,
             scan_cache_path=str(cache_path),
@@ -412,6 +421,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Google Slides guaranteed per account (default: 20)")
     p.add_argument("--out", default="out/quality_sample_manifest.json", help="Output manifest path")
     p.add_argument("--gmail-query", default="", help="Optional Gmail search query to filter messages")
+    p.add_argument("--before", default="", metavar="YYYY-MM-DD",
+                    help="Only scan Drive files and Gmail messages dated before this date")
     p.add_argument("--skip-drive", action="store_true", help="Skip Drive scanning/selection")
     p.add_argument("--skip-gmail", action="store_true", help="Skip Gmail scanning/selection")
     sa_default = str(default_service_account_path()) if default_service_account_path() else ""
@@ -443,6 +454,19 @@ def main(argv: list[str] | None = None) -> int:
     if selected_users:
         _log(f"[mode] restricted to {len(selected_users)} selected user(s): {', '.join(selected_users)}")
 
+    drive_before: str | None = None
+    gmail_query = args.gmail_query
+    if args.before:
+        try:
+            before_date = datetime.strptime(args.before, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except ValueError:
+            print(f"ERROR: --before must be YYYY-MM-DD, got {args.before!r}", flush=True)
+            return 1
+        drive_before = f"{before_date}T00:00:00Z"
+        before_term = f"before:{before_date.replace('-', '/')}"
+        gmail_query = f"{gmail_query} {before_term}".strip()
+        _log(f"[mode] only scanning items modified/dated before {before_date}")
+
     out_path = (_ROOT / args.out).resolve()
     scan_cache_dir = out_path.parent
     scan_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -454,15 +478,17 @@ def main(argv: list[str] | None = None) -> int:
     drive_total = 0
     native_counts = {"gsheets": 0, "gdocs": 0, "gslides": 0}
     if not args.skip_drive:
-        drive_scan_cache = str(scan_cache_dir / (out_path.stem + ".drive_scan_cache.jsonl"))
+        cache_suffix = f".before_{args.before}" if args.before else ""
+        drive_scan_cache = str(scan_cache_dir / (out_path.stem + cache_suffix + ".drive_scan_cache.jsonl"))
         if workspace_mode:
             buckets = collect_drive_candidates_workspace(
                 sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache,
-                users=selected_users or None, progress_log=_log,
+                users=selected_users or None, modified_before=drive_before, progress_log=_log,
             )
         else:
             buckets = collect_drive_candidates_single(
-                service=my_drive_service(), scan_cache=drive_scan_cache, progress_log=_log,
+                service=my_drive_service(), scan_cache=drive_scan_cache,
+                modified_before=drive_before, progress_log=_log,
             )
         binary_selected, drive_total = allocate_binary_by_account(buckets["binary"], drive_cap_bytes)
         n_accounts = len({r.get("owner_email") or "" for r in buckets["binary"]})
@@ -504,8 +530,9 @@ def main(argv: list[str] | None = None) -> int:
             _gmail_service_for = lambda _email: single_gmail_svc  # noqa: E731 — same account for every "user"
 
         gmail_candidates = collect_gmail_candidates(
-            get_user_service=_gmail_service_for, users=gmail_users, gmail_query=args.gmail_query,
-            scan_cache_dir=scan_cache_dir, progress_log=_log,
+            get_user_service=_gmail_service_for, users=gmail_users, gmail_query=gmail_query,
+            scan_cache_dir=scan_cache_dir, cache_suffix=f"__before_{args.before}" if args.before else "",
+            progress_log=_log,
         )
         gmail_selected, gmail_total = greedy_fill(gmail_candidates, gmail_cap_bytes)
         _log(f"[gmail] selected {len(gmail_selected)}/{len(gmail_candidates)} thread(s), "

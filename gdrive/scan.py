@@ -87,6 +87,25 @@ def _row_from_file(f: dict[str, Any], path: str, *, is_folder: bool, is_shortcut
     }
 
 
+def _modified_before_cutoff(modified_time: str | None, cutoff: str) -> bool:
+    """True if ``modified_time`` (RFC3339, e.g. from the Drive/Gmail APIs) is before
+    ``cutoff`` (RFC3339). Missing/unparseable timestamps are never filtered out — we
+    only exclude what we can positively confirm is too new."""
+    if not modified_time:
+        return True
+    try:
+        from datetime import datetime, timezone
+        mt = datetime.fromisoformat(modified_time.replace("Z", "+00:00"))
+        cut = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
+        if mt.tzinfo is None:
+            mt = mt.replace(tzinfo=timezone.utc)
+        if cut.tzinfo is None:
+            cut = cut.replace(tzinfo=timezone.utc)
+        return mt < cut
+    except ValueError:
+        return True
+
+
 def walk_drive_folder(
     service,
     folder_id: str,
@@ -94,6 +113,7 @@ def walk_drive_folder(
     path_prefix: str = "",
     include_folders: bool = False,
     max_files: int | None = None,
+    modified_before: str | None = None,
     progress_log: Callable[[str], None] | None = None,
     progress_every: int = 500,
     scan_cache_path: str | Path | None = None,
@@ -113,6 +133,10 @@ def walk_drive_folder(
 
     If ``max_files`` is set, stop after that many file rows (non-folder rows, including
     shortcuts). Folder rows from ``include_folders`` do not count toward the limit.
+
+    If ``modified_before`` (RFC3339) is set, file/shortcut rows modified on or after it
+    are skipped — but folders are **always** traversed regardless of their own
+    ``modifiedTime``, so an old file inside a recently-touched folder is never missed.
 
     If ``progress_log`` is set, it is called every ``progress_every`` **file** rows
     (shortcuts and regular files; not folder-only rows) with a short status line.
@@ -167,19 +191,22 @@ def walk_drive_folder(
             is_shortcut = mid == SHORTCUT_MIME
 
             if is_shortcut:
-                rows.append(_row_from_file(f, sub, is_folder=False, is_shortcut=True))
-                file_rows += 1
-                _emit_progress(sub)
-                if max_files is not None and file_rows >= max_files:
-                    stop = True
+                if modified_before is None or _modified_before_cutoff(f.get("modifiedTime"), modified_before):
+                    rows.append(_row_from_file(f, sub, is_folder=False, is_shortcut=True))
+                    file_rows += 1
+                    _emit_progress(sub)
+                    if max_files is not None and file_rows >= max_files:
+                        stop = True
                 continue
 
             if is_folder:
                 if include_folders:
                     rows.append(_row_from_file(f, sub, is_folder=True, is_shortcut=False))
-                visit(f["id"], sub)
+                visit(f["id"], sub)  # always recurse — a folder's own modifiedTime doesn't reflect its contents
                 continue
 
+            if modified_before is not None and not _modified_before_cutoff(f.get("modifiedTime"), modified_before):
+                continue
             rows.append(_row_from_file(f, sub, is_folder=False, is_shortcut=False))
             file_rows += 1
             _emit_progress(sub)
@@ -266,6 +293,7 @@ def walk_all_user_my_drives(
     shared_drives: list[dict[str, Any]] | None = None,
     shared_drive_service=None,
     max_files: int | None = None,
+    modified_before: str | None = None,
     progress_log: Callable[[str], None] | None = None,
     progress_every: int = 500,
     scan_cache_path: str | Path | None = None,
@@ -278,6 +306,9 @@ def walk_all_user_my_drives(
     ``shared_drives`` is a pre-fetched list from ``list_shared_drives``.
     ``shared_drive_service`` is a Drive service with access to walk each shared drive
     (typically the admin's impersonated service).
+
+    ``modified_before`` (RFC3339), if set, excludes files modified on or after it —
+    see ``walk_drive_folder`` for exactly how that's applied.
     """
     all_rows: list[dict[str, Any]] = []
     remaining = max_files
@@ -297,6 +328,7 @@ def walk_all_user_my_drives(
                 "root",
                 path_prefix=f"My Drive ({email})",
                 max_files=remaining,
+                modified_before=modified_before,
                 progress_log=progress_log,
                 progress_every=progress_every,
                 scan_cache_path=user_cache,
@@ -331,6 +363,7 @@ def walk_all_user_my_drives(
                     did,
                     path_prefix=dname,
                     max_files=remaining,
+                    modified_before=modified_before,
                     progress_log=progress_log,
                     progress_every=progress_every,
                     scan_cache_path=drv_cache,
@@ -351,6 +384,7 @@ def walk_entire_workspace(
     include_my_drive: bool = True,
     include_shared_drives: bool = True,
     max_files: int | None = None,
+    modified_before: str | None = None,
     progress_log: Callable[[str], None] | None = None,
     progress_every: int = 500,
     scan_cache_path: str | Path | None = None,
@@ -360,6 +394,9 @@ def walk_entire_workspace(
     Each file row's ``path`` is prefixed with the drive name so sources are
     distinguishable in the inventory (e.g. ``My Drive/Finance/Q3.xlsx`` vs
     ``Engineering/repo-docs/README.md``).
+
+    ``modified_before`` (RFC3339), if set, excludes files modified on or after it —
+    see ``walk_drive_folder`` for exactly how that's applied.
     """
     all_rows: list[dict[str, Any]] = []
     remaining = max_files
@@ -372,6 +409,7 @@ def walk_entire_workspace(
             "root",
             path_prefix="My Drive",
             max_files=remaining,
+            modified_before=modified_before,
             progress_log=progress_log,
             progress_every=progress_every,
             scan_cache_path=(
@@ -398,6 +436,7 @@ def walk_entire_workspace(
                 did,
                 path_prefix=dname,
                 max_files=remaining,
+                modified_before=modified_before,
                 progress_log=progress_log,
                 progress_every=progress_every,
                 scan_cache_path=(

@@ -240,6 +240,15 @@ python tools/build_quality_sample.py \
   --users alice@yourdomain.com bob@yourdomain.com
 ```
 
+Only things dated before a cutoff (e.g. everything before this year):
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --before 2026-01-01
+```
+
 Just your own Drive + Gmail:
 
 ```
@@ -262,6 +271,7 @@ This can take a while for a large Workspace — it caches scan progress under `o
 | `--gslides-per-account` | `20` | Google Slides guaranteed per account (Workspace mode) |
 | `--out` | `out/quality_sample_manifest.json` | Where the manifest is written |
 | `--gmail-query` | (none) | Gmail search query to filter candidate messages (e.g. `after:2024/01/01`) |
+| `--before` | (none) | Only scan Drive files and Gmail messages dated before this date (`YYYY-MM-DD`). Applies to both sources at once — Drive folders are still always traversed regardless of their own modified time, so an old file inside a recently-touched folder is never missed. |
 | `--skip-drive` | off | Skip Drive scanning entirely |
 | `--skip-gmail` | off | Skip Gmail scanning entirely |
 | `--users` | (whole domain) | Workspace mode only: scan just these accounts instead of everyone — space- or comma-separated emails, e.g. `--users a@co.com b@co.com`. Skips Admin SDK enumeration entirely, so it doesn't even need the Admin SDK API/scope. |
