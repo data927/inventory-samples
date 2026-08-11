@@ -1,4 +1,13 @@
-"""Scan the entire Google Workspace and build a size-capped "quality" sample manifest.
+"""Build a size-capped "quality" sample manifest from Google Drive + Gmail.
+
+Two scan modes, chosen automatically from whatever auth is available:
+
+  Workspace mode  — pass --service-account + --admin-email (Domain-Wide Delegation):
+                    scans every user's My Drive + Shared Drives, every user's Gmail.
+  My Drive mode   — no service account given: scans just the signed-in account's own
+                    Drive + Gmail, reusing the same OAuth tokens the rest of this repo's
+                    tools already use (.secrets/google_drive_token.json, .secrets/gmail_token.json),
+                    prompting a browser login the first time either is missing.
 
 Largest-first selection is used as a quality proxy for binary Drive files (PDFs, Office
 docs, images, etc.) and Gmail threads: each is sorted by size, then greedily kept until
@@ -15,12 +24,15 @@ gmail/pipeline.py) that also downloads/snippets/classifies every file.
 
 Usage:
 
+  # Workspace-wide (needs Domain-Wide Delegation)
   python tools/build_quality_sample.py \\
       --service-account .secrets/service_account.json --admin-email admin@yourdomain.com
 
+  # Just your own Drive + Gmail (no service account)
+  python tools/build_quality_sample.py
+
   python tools/build_quality_sample.py --drive-cap-gb 75 --gmail-cap-gb 12.5 \\
       --gsheets-limit 350 --gdocs-limit 300 --gslides-limit 150 \\
-      --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
       --out out/quality_sample_manifest.json
 """
 
@@ -32,7 +44,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
@@ -47,11 +59,16 @@ from gdrive.credentials import (
     build_admin_service,
     build_drive_service,
     build_gmail_service,
+    default_client_secrets_path,
     default_service_account_path,
+    default_token_path,
+    get_credentials,
     get_service_account_credentials,
 )
-from gdrive.scan import list_shared_drives, list_workspace_users, walk_all_user_my_drives
+from gdrive.scan import list_shared_drives, list_workspace_users, walk_all_user_my_drives, walk_entire_workspace
 from gmail.scan import fetch_message_meta, scan_mailbox
+
+_GMAIL_TOKEN = _ROOT / ".secrets" / "gmail_token.json"
 
 GB = 1024 ** 3
 
@@ -90,33 +107,7 @@ def select_top_by_recency(rows: list[dict[str, Any]], limit: int) -> list[dict[s
     return ordered[:limit]
 
 
-def collect_drive_candidates(
-    *, sa_file: Path, admin_email: str, scan_cache: str, progress_log=_log,
-) -> dict[str, list[dict[str, Any]]]:
-    admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
-    admin_svc = build_admin_service(admin_sdk_creds)
-    users = list_workspace_users(admin_svc)
-    progress_log(f"[drive] {len(users)} workspace user(s) found")
-
-    admin_drive_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_READONLY)
-    admin_drive_svc = build_drive_service(admin_drive_creds)
-    shared = list_shared_drives(admin_drive_svc, use_domain_admin_access=True)
-    progress_log(f"[drive] {len(shared)} Shared Drive(s)")
-
-    def _user_drive_service(email: str):
-        u_creds = get_service_account_credentials(sa_file, email, SCOPES_READONLY)
-        return build_drive_service(u_creds)
-
-    rows = walk_all_user_my_drives(
-        _user_drive_service,
-        users,
-        shared_drives=shared,
-        shared_drive_service=admin_drive_svc,
-        progress_log=progress_log,
-        scan_cache_path=scan_cache,
-    )
-    progress_log(f"[drive] scan complete: {len(rows)} row(s)")
-
+def _bucket_drive_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     native_by_mime = {MIME_GSHEET: "gsheets", MIME_GDOC: "gdocs", MIME_GSLIDES: "gslides"}
     buckets: dict[str, list[dict[str, Any]]] = {"binary": [], "gsheets": [], "gdocs": [], "gslides": []}
     for r in rows:
@@ -142,6 +133,51 @@ def collect_drive_candidates(
     return buckets
 
 
+def collect_drive_candidates_workspace(
+    *, sa_file: Path, admin_email: str, scan_cache: str, progress_log=_log,
+) -> dict[str, list[dict[str, Any]]]:
+    """Every user's My Drive + every Shared Drive (Domain-Wide Delegation)."""
+    admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
+    admin_svc = build_admin_service(admin_sdk_creds)
+    users = list_workspace_users(admin_svc)
+    progress_log(f"[drive] {len(users)} workspace user(s) found")
+
+    admin_drive_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_READONLY)
+    admin_drive_svc = build_drive_service(admin_drive_creds)
+    shared = list_shared_drives(admin_drive_svc, use_domain_admin_access=True)
+    progress_log(f"[drive] {len(shared)} Shared Drive(s)")
+
+    def _user_drive_service(email: str):
+        u_creds = get_service_account_credentials(sa_file, email, SCOPES_READONLY)
+        return build_drive_service(u_creds)
+
+    rows = walk_all_user_my_drives(
+        _user_drive_service,
+        users,
+        shared_drives=shared,
+        shared_drive_service=admin_drive_svc,
+        progress_log=progress_log,
+        scan_cache_path=scan_cache,
+    )
+    progress_log(f"[drive] scan complete: {len(rows)} row(s)")
+    return _bucket_drive_rows(rows)
+
+
+def collect_drive_candidates_single(*, service, scan_cache: str, progress_log=_log) -> dict[str, list[dict[str, Any]]]:
+    """Just the signed-in account's own My Drive + Shared Drives it can see."""
+    shared = list_shared_drives(service)
+    progress_log(f"[drive] {len(shared)} Shared Drive(s) visible to this account")
+    rows = walk_entire_workspace(
+        service,
+        include_my_drive=True,
+        include_shared_drives=True,
+        progress_log=progress_log,
+        scan_cache_path=scan_cache,
+    )
+    progress_log(f"[drive] scan complete: {len(rows)} row(s)")
+    return _bucket_drive_rows(rows)
+
+
 def add_to_thread(by_thread: dict[tuple[str, str], dict[str, Any]], email: str, meta: dict[str, Any]) -> None:
     """Merge one message's metadata into its (email, thread_id) group, summing size."""
     key = (email, meta["thread_id"])
@@ -157,12 +193,16 @@ def add_to_thread(by_thread: dict[tuple[str, str], dict[str, Any]], email: str, 
 
 
 def collect_gmail_candidates(
-    *, sa_file: Path, users: list[str], gmail_query: str, scan_cache_dir: Path, progress_log=_log,
+    *,
+    get_user_service: Callable[[str], Any],
+    users: list[str],
+    gmail_query: str,
+    scan_cache_dir: Path,
+    progress_log=_log,
 ) -> list[dict[str, Any]]:
     by_thread: dict[tuple[str, str], dict[str, Any]] = {}
     for email in users:
-        creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
-        svc = build_gmail_service(creds)
+        svc = get_user_service(email)
         cache_path = scan_cache_dir / f"gmail_ids__{email.replace('@', '_at_')}.txt"
         ids = scan_mailbox(
             svc, email, query=gmail_query, progress_log=progress_log,
@@ -174,6 +214,49 @@ def collect_gmail_candidates(
             if progress_log and i % 500 == 0:
                 progress_log(f"[gmail] {email}: {i}/{len(ids)} message(s) scanned")
     return list(by_thread.values())
+
+
+def my_drive_service():
+    """OAuth Drive service for the signed-in account, reusing the same token this repo's
+    other tools already use (prompts a browser login the first time it's missing)."""
+    creds = get_credentials(
+        client_secrets=default_client_secrets_path(),
+        token_path=default_token_path(),
+        full_read_scope=True,
+        login_only=False,
+    )
+    return build_drive_service(creds)
+
+
+def my_gmail_service():
+    """OAuth Gmail service for the signed-in account, reusing run_gmail.py's token file."""
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    token_path = Path(os.environ.get("GMAIL_TOKEN_PATH") or _GMAIL_TOKEN).expanduser().resolve()
+    scopes = list(SCOPES_GMAIL)
+
+    creds = None
+    if token_path.is_file():
+        creds = Credentials.from_authorized_user_file(str(token_path), scopes)
+    if not (creds and creds.valid):
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            client_secrets = default_client_secrets_path()
+            if not client_secrets.is_file():
+                raise FileNotFoundError(
+                    f"OAuth client secrets not found: {client_secrets}\nRun: python setup.py"
+                )
+            flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets), scopes)
+            creds = flow.run_local_server(port=0, prompt="consent", open_browser=True)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    service = build_gmail_service(creds)
+    email = service.users().getProfile(userId="me").execute().get("emailAddress") or "me"
+    return service, email
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -199,13 +282,17 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     sa_file = Path(args.service_account).expanduser().resolve() if args.service_account else None
-    if not sa_file or not sa_file.is_file():
-        print("ERROR: --service-account is required (full-workspace scan needs Domain-Wide Delegation)", flush=True)
-        return 1
     admin_email = args.admin_email or os.environ.get("GOOGLE_ADMIN_EMAIL", "").strip()
-    if not admin_email:
-        print("ERROR: --admin-email (or GOOGLE_ADMIN_EMAIL env var) is required", flush=True)
+    workspace_mode = bool(sa_file and sa_file.is_file() and admin_email)
+    if args.service_account and not workspace_mode:
+        # A service account was explicitly passed but is incomplete/unusable — fail loud
+        # rather than silently falling back to a single-account scan the user didn't ask for.
+        if not (sa_file and sa_file.is_file()):
+            print(f"ERROR: service account file not found: {sa_file}", flush=True)
+            return 1
+        print("ERROR: --admin-email (or GOOGLE_ADMIN_EMAIL env var) is required with --service-account", flush=True)
         return 1
+    _log(f"[mode] {'workspace (Domain-Wide Delegation)' if workspace_mode else 'my Drive + Gmail only'}")
 
     out_path = (_ROOT / args.out).resolve()
     scan_cache_dir = out_path.parent
@@ -219,9 +306,14 @@ def main(argv: list[str] | None = None) -> int:
     native_counts = {"gsheets": 0, "gdocs": 0, "gslides": 0}
     if not args.skip_drive:
         drive_scan_cache = str(scan_cache_dir / (out_path.stem + ".drive_scan_cache.jsonl"))
-        buckets = collect_drive_candidates(
-            sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache, progress_log=_log,
-        )
+        if workspace_mode:
+            buckets = collect_drive_candidates_workspace(
+                sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache, progress_log=_log,
+            )
+        else:
+            buckets = collect_drive_candidates_single(
+                service=my_drive_service(), scan_cache=drive_scan_cache, progress_log=_log,
+            )
         binary_selected, drive_total = greedy_fill(buckets["binary"], drive_cap_bytes)
         _log(f"[drive] binary files: selected {len(binary_selected)}/{len(buckets['binary'])}, "
              f"{drive_total / GB:.2f}GB / {args.drive_cap_gb:.2f}GB cap")
@@ -239,11 +331,21 @@ def main(argv: list[str] | None = None) -> int:
     gmail_selected: list[dict[str, Any]] = []
     gmail_total = 0
     if not args.skip_gmail:
-        admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
-        admin_svc = build_admin_service(admin_sdk_creds)
-        gmail_users = list_workspace_users(admin_svc)
+        if workspace_mode:
+            admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
+            admin_svc = build_admin_service(admin_sdk_creds)
+            gmail_users = list_workspace_users(admin_svc)
+
+            def _gmail_service_for(email: str):
+                creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
+                return build_gmail_service(creds)
+        else:
+            single_gmail_svc, my_email = my_gmail_service()
+            gmail_users = [my_email]
+            _gmail_service_for = lambda _email: single_gmail_svc  # noqa: E731 — same account for every "user"
+
         gmail_candidates = collect_gmail_candidates(
-            sa_file=sa_file, users=gmail_users, gmail_query=args.gmail_query,
+            get_user_service=_gmail_service_for, users=gmail_users, gmail_query=args.gmail_query,
             scan_cache_dir=scan_cache_dir, progress_log=_log,
         )
         gmail_selected, gmail_total = greedy_fill(gmail_candidates, gmail_cap_bytes)
@@ -252,6 +354,7 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "scan_mode": "workspace" if workspace_mode else "my_drive",
         "drive_cap_bytes": drive_cap_bytes,
         "drive_total_bytes": drive_total,
         "drive_native_selected": native_counts,

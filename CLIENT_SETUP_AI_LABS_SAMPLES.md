@@ -9,7 +9,7 @@ You sign in with **your** Google account for the copy step. No shared folder and
 There are two roles in this guide:
 
 - **Client** — signs in with their own Google account and runs the copy steps (Parts 1, 2, 4, 6, 8). No admin access needed.
-- **Operator** — the person running the extraction for this engagement, who has a Service Account with Domain-Wide Delegation and a Workspace admin email. Only needed for Part 5 (building a fresh manifest across the whole Workspace).
+- **Operator** — the person running the extraction for this engagement (Part 5). A Service Account with Domain-Wide Delegation is only needed if they're building a manifest across the **whole Workspace**; scanning just their own Drive + Gmail needs no extra setup at all.
 
 > **Already ran Inventory Segmentor on this machine?**  
 > Skip to [Part 4 — Google Drive login](#part-4--google-drive-login) if the project is already cloned and `.venv` works. Then jump to [Part 6 — Build the sample set](#part-6--build-the-sample-set).
@@ -21,7 +21,7 @@ There are two roles in this guide:
 - The **same Google account** you used when the Drive inventory was run
 - Python 3 and Git (steps below if you don't have them)
 - An OAuth client JSON file (often already set up from Inventory Segmentor — see Part 4)
-- **(Operator only, Part 5)** A Service Account JSON with Domain-Wide Delegation, and a Workspace super-admin email — see `CLIENT_SETUP.md` → Part 4B
+- **(Operator, Part 5 — whole-Workspace mode only)** A Service Account JSON with Domain-Wide Delegation, and a Workspace super-admin email — see `CLIENT_SETUP.md` → Part 4B. Not needed if scanning just your own Drive + Gmail.
 - **(Optional, Part 8 — Gmail thread samples)** The `gmail.insert` scope enabled on the OAuth client, added to its consent screen in Google Cloud Console
 
 **You do not need** an Anthropic / OpenAI / Gemini API key for any of this.
@@ -73,19 +73,13 @@ git clone https://github.com/data927/inventory-segmentor.git
 cd inventory-segmentor
 ```
 
-Confirm the sample list is present:
+Confirm the clone worked:
 
 ```
-ls data/ai_labs_1200_balanced_sample.json
+ls tools/build_quality_sample.py
 ```
 
-Mac / Linux: if `ls` fails, try:
-
-```
-ls data/
-```
-
-You should see `ai_labs_1200_balanced_sample.json`. That file is **bundled in the repo** as a fallback default — you do not need any Excel file. If Part 5 below has already been run for this engagement, you'll use its output manifest instead (see Part 6).
+For most engagements, Part 5 below builds a **fresh** manifest by scanning live — that's what you'll actually use in Part 6, no Excel file needed. The repo also carries one legacy fixed list, `data/ai_labs_1200_balanced_sample.json`, kept only as a fallback default for Part 6 if Part 5 is skipped entirely.
 
 ---
 
@@ -164,11 +158,16 @@ If setup put it elsewhere, that is fine as long as `.env` points to it (`GOOGLE_
 
 ---
 
-## Part 5 — (Operator) Build a fresh, size-capped sample manifest
+## Part 5 — Build a fresh, size-capped sample manifest
 
-**Skip this part if you're the client running the bundled sample set — jump to Part 6.** This part is for whoever is running the extraction for the engagement, using the admin-level Service Account.
+**Skip this part if you're the client running the bundled sample set — jump to Part 6.** This part is for whoever is running the extraction for the engagement.
 
-`data/ai_labs_1200_balanced_sample.json` (used by default in Part 6) is a fixed, hand-picked list. For a fresh engagement, `tools/build_quality_sample.py` instead scans the **entire live Workspace** — every user's My Drive + Shared Drives, every user's Gmail — and builds a new manifest using two selection rules:
+`data/ai_labs_1200_balanced_sample.json` (used by default in Part 6) is a fixed, hand-picked list. `tools/build_quality_sample.py` instead scans live and builds a fresh manifest, in one of two modes — **picked automatically** depending on what auth you give it:
+
+- **Workspace mode** — pass `--service-account` + `--admin-email` (Domain-Wide Delegation): scans **every user's** My Drive + Shared Drives + Gmail across the whole org.
+- **My Drive mode** — run it with no service account: scans just **your own** Drive + Gmail, reusing the same OAuth tokens the rest of this repo's tools already use. If you've already signed in for Part 4 / a Gmail scan, no new login is needed; otherwise a browser opens once.
+
+Either way, the manifest is built using two selection rules:
 
 - **Binary files** (PDFs, Office docs, images, etc.) and **Gmail threads** — largest first (size is used as a quality proxy; there's no LLM scoring pass) until a byte cap is hit:
   - **Drive:** ~75GB
@@ -182,14 +181,23 @@ Gmail messages are grouped into **whole threads** before selection — a thread 
 
 ### Prerequisite
 
-Service Account + Domain-Wide Delegation, already set up. If not, see `CLIENT_SETUP.md` → **Part 4B — Service Account with Domain-Wide Delegation** and come back here once you have the service account JSON path and a super-admin email.
+- **Workspace mode:** Service Account + Domain-Wide Delegation, already set up. If not, see `CLIENT_SETUP.md` → **Part 4B — Service Account with Domain-Wide Delegation** and come back here once you have the service account JSON path and a super-admin email.
+- **My Drive mode:** nothing extra — reuses whatever OAuth login you've already done (Part 4, or a prior Gmail scan). If neither token exists yet, a browser opens the first time each is needed.
 
 ### Run it
+
+Workspace-wide:
 
 ```
 python tools/build_quality_sample.py \
   --service-account ~/Downloads/service_account.json \
   --admin-email admin@yourdomain.com
+```
+
+Just your own Drive + Gmail:
+
+```
+python tools/build_quality_sample.py
 ```
 
 This can take a while for a large Workspace — it caches scan progress under `out/` (`*.drive_scan_cache.jsonl`, `gmail_ids__*.txt`), so re-running the same command resumes rather than rescanning from zero.
@@ -347,7 +355,7 @@ By default this reads `out/quality_sample_manifest.json` (Part 5's output); pass
 | `sample manifest not found` | Update/pull the latest code so `data/ai_labs_1200_balanced_sample.json` exists, or check the `--manifest` path |
 | Interrupted halfway | Re-run the same command — both `export_ai_labs_samples.py` and `export_ai_labs_gmail_threads.py` resume automatically |
 | Want a fresh destination folder | Delete `out/ai_labs_samples.checkpoint.jsonl` and `out/ai_labs_samples.checkpoint.jsonl.dest.json`, then run again |
-| `build_quality_sample.py`: `--service-account is required` | Full-workspace scanning needs Domain-Wide Delegation — see `CLIENT_SETUP.md` → Part 4B |
+| `build_quality_sample.py`: `--admin-email is required with --service-account` | You passed `--service-account` but not `--admin-email` — add it, or drop `--service-account` entirely to scan just your own Drive + Gmail instead |
 | Manifest has no `gmail_threads` / Part 8 finds nothing | Run Part 5 first (with Gmail not skipped), or point `--manifest` at a manifest that has one |
 | Gmail insert fails with a permissions / consent screen error | `gmail.insert` scope isn't on the OAuth client's consent screen yet, or (Testing mode) the account isn't added as a test user — operator needs to fix this in Cloud Console |
 
@@ -358,6 +366,9 @@ By default this reads `out/quality_sample_manifest.json` (Part 5's output); pass
 ```
 # (Operator) Build a fresh manifest across the whole Workspace
 python tools/build_quality_sample.py --service-account ~/Downloads/service_account.json --admin-email admin@yourdomain.com
+
+# (Operator) Or just your own Drive + Gmail — no service account needed
+python tools/build_quality_sample.py
 
 # Preview the Drive copy
 python tools/export_ai_labs_samples.py --dry-run
