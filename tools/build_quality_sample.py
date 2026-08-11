@@ -16,7 +16,10 @@ included or excluded as a whole unit, never split, so exported mail reads correc
 
 Google-native Docs/Sheets/Slides have no fixed byte size (nothing to rank by size), so
 they're selected separately by a fixed count each, most-recently-modified first, on top
-of (not counted against) the binary Drive byte cap.
+of (not counted against) the binary Drive byte cap. In workspace mode, both the binary
+cap and the native quotas are spread **per account** rather than pooled globally: each
+account is guaranteed its own baseline (native files) or a cap slice proportional to its
+own data volume (binary files), so one large account can't crowd out the rest.
 
 No LLM classification pass is used; this only needs raw scan metadata (size, thread id,
 modified time), which is far cheaper than the full pipeline (gdrive/pipeline_1tb.py,
@@ -105,6 +108,110 @@ def select_top_by_recency(rows: list[dict[str, Any]], limit: int) -> list[dict[s
     """Most-recently-modified first — used for native files, which have no size to rank by."""
     ordered = sorted(rows, key=lambda r: r.get("modified_time") or "", reverse=True)
     return ordered[:limit]
+
+
+def _group_by_account(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_account: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_account.setdefault(r.get("owner_email") or "", []).append(r)
+    return by_account
+
+
+def select_native_by_account(
+    rows: list[dict[str, Any]], *, per_account_limit: int, overall_cap: int,
+) -> list[dict[str, Any]]:
+    """Guarantee up to ``per_account_limit`` most-recent files per account, so no single
+    account crowds out the rest; if that guaranteed total is under ``overall_cap``, top
+    up with the next most-recent files from anywhere. The guarantee is never trimmed
+    back down, so with enough accounts the final total can exceed ``overall_cap``."""
+    floor_selected: list[dict[str, Any]] = []
+    for acct_rows in _group_by_account(rows).values():
+        floor_selected.extend(select_top_by_recency(acct_rows, per_account_limit))
+
+    if len(floor_selected) >= overall_cap:
+        return floor_selected
+
+    floor_ids = {r["file_id"] for r in floor_selected}
+    remaining_pool = [r for r in rows if r["file_id"] not in floor_ids]
+    topup = select_top_by_recency(remaining_pool, overall_cap - len(floor_selected))
+    return floor_selected + topup
+
+
+def _round_robin_fill(
+    queues: dict[str, list[dict[str, Any]]],
+    cursor: dict[str, int],
+    priority_order: list[str],
+    cap_bytes: int,
+    total_selected: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Each round, every account (in ``priority_order``) contributes its next
+    not-yet-selected item that still fits, skipping any that don't (an item that doesn't
+    fit now never will later, since remaining cap only shrinks). Repeats until the cap is
+    full or nobody has anything left that fits. Mutates ``cursor`` in place."""
+    selected: list[dict[str, Any]] = []
+    progressed = True
+    while total_selected < cap_bytes and progressed:
+        progressed = False
+        for email in priority_order:
+            queue = queues[email]
+            i = cursor[email]
+            while i < len(queue) and total_selected + queue[i]["size_bytes"] > cap_bytes:
+                i += 1
+            cursor[email] = i
+            if i < len(queue):
+                selected.append(queue[i])
+                total_selected += queue[i]["size_bytes"]
+                cursor[email] = i + 1
+                progressed = True
+    return selected, total_selected
+
+
+def allocate_binary_by_account(
+    rows: list[dict[str, Any]], cap_bytes: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Two stages, both accounting for every account (ordered by its own total data,
+    biggest first):
+
+    1. **Guarantee** — reserve an equal minimal slice per account (``cap_bytes`` /
+       number of accounts) and fill it with that account's *smallest* file that fits.
+       Cheapest possible way to guarantee every account with at least one fitting file
+       gets included, leaving the rest of the cap free for stage 2.
+    2. **Priority round-robin** — with whatever cap remains, each account contributes
+       its next-largest not-yet-selected file, biggest-data account first each round,
+       repeating until the cap is full or nobody has anything left that fits. Gives
+       accounts with more data a bigger absolute share without letting any single one
+       consume the whole cap in one turn.
+
+    Together: no account is ever shut out purely because its file sizes don't line up
+    with a fixed slice, while accounts with more data still end up with more selected in
+    the typical case. (In pathological cases — very few accounts, a cap barely bigger
+    than one account's smallest file — the inclusion guarantee can occasionally cost a
+    big account some of its proportional edge; that trade-off is intentional.)
+    """
+    by_account = _group_by_account(rows)
+    if not by_account:
+        return [], 0
+
+    priority_order = sorted(by_account, key=lambda e: -sum(r["size_bytes"] for r in by_account[e]))
+    queues = {e: sorted(acct_rows, key=lambda r: -r["size_bytes"]) for e, acct_rows in by_account.items()}
+    cursor = {e: 0 for e in by_account}
+
+    equal_share = cap_bytes // len(by_account)
+    selected: list[dict[str, Any]] = []
+    total_selected = 0
+    for email in priority_order:
+        queue = queues[email]
+        if not queue:
+            continue
+        smallest = queue[-1]  # already sorted largest-first, so the smallest is last
+        if smallest["size_bytes"] <= equal_share and total_selected + smallest["size_bytes"] <= cap_bytes:
+            selected.append(smallest)
+            total_selected += smallest["size_bytes"]
+            queues[email] = queue[:-1]  # drop it; round-robin below starts fresh at index 0
+
+    topup, total_selected = _round_robin_fill(queues, cursor, priority_order, cap_bytes, total_selected)
+    selected.extend(topup)
+    return selected, total_selected
 
 
 def _bucket_drive_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -265,11 +372,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="Byte cap for binary Drive files, in GB (default: 75)")
     p.add_argument("--gmail-cap-gb", type=float, default=12.5, help="Gmail selection cap in GB (default: 12.5)")
     p.add_argument("--gsheets-limit", type=int, default=350,
-                    help="Max Google Sheets to include, most-recently-modified first (default: 350)")
+                    help="Overall target total for Google Sheets, most-recently-modified first "
+                         "(default: 350; topped up to this only if per-account guarantees fall short)")
     p.add_argument("--gdocs-limit", type=int, default=300,
-                    help="Max Google Docs to include, most-recently-modified first (default: 300)")
+                    help="Overall target total for Google Docs (default: 300, see --gsheets-limit)")
     p.add_argument("--gslides-limit", type=int, default=150,
-                    help="Max Google Slides to include, most-recently-modified first (default: 150)")
+                    help="Overall target total for Google Slides (default: 150, see --gsheets-limit)")
+    p.add_argument("--gsheets-per-account", type=int, default=30,
+                    help="Google Sheets guaranteed per account, most-recently-modified first (default: 30)")
+    p.add_argument("--gdocs-per-account", type=int, default=40,
+                    help="Google Docs guaranteed per account (default: 40)")
+    p.add_argument("--gslides-per-account", type=int, default=20,
+                    help="Google Slides guaranteed per account (default: 20)")
     p.add_argument("--out", default="out/quality_sample_manifest.json", help="Output manifest path")
     p.add_argument("--gmail-query", default="", help="Optional Gmail search query to filter messages")
     p.add_argument("--skip-drive", action="store_true", help="Skip Drive scanning/selection")
@@ -314,17 +428,23 @@ def main(argv: list[str] | None = None) -> int:
             buckets = collect_drive_candidates_single(
                 service=my_drive_service(), scan_cache=drive_scan_cache, progress_log=_log,
             )
-        binary_selected, drive_total = greedy_fill(buckets["binary"], drive_cap_bytes)
-        _log(f"[drive] binary files: selected {len(binary_selected)}/{len(buckets['binary'])}, "
-             f"{drive_total / GB:.2f}GB / {args.drive_cap_gb:.2f}GB cap")
+        binary_selected, drive_total = allocate_binary_by_account(buckets["binary"], drive_cap_bytes)
+        n_accounts = len({r.get("owner_email") or "" for r in buckets["binary"]})
+        _log(f"[drive] binary files: selected {len(binary_selected)}/{len(buckets['binary'])} "
+             f"across {n_accounts} account(s), {drive_total / GB:.2f}GB / {args.drive_cap_gb:.2f}GB cap")
 
-        native_limits = {"gsheets": args.gsheets_limit, "gdocs": args.gdocs_limit, "gslides": args.gslides_limit}
+        native_limits = {
+            "gsheets": (args.gsheets_per_account, args.gsheets_limit),
+            "gdocs": (args.gdocs_per_account, args.gdocs_limit),
+            "gslides": (args.gslides_per_account, args.gslides_limit),
+        }
         native_selected: list[dict[str, Any]] = []
-        for kind, limit in native_limits.items():
-            picked = select_top_by_recency(buckets[kind], limit)
+        for kind, (per_acct, overall) in native_limits.items():
+            picked = select_native_by_account(buckets[kind], per_account_limit=per_acct, overall_cap=overall)
             native_counts[kind] = len(picked)
             native_selected.extend(picked)
-            _log(f"[drive] {kind}: selected {len(picked)}/{len(buckets[kind])} (limit {limit}, most-recent first)")
+            _log(f"[drive] {kind}: selected {len(picked)}/{len(buckets[kind])} "
+                 f"(guaranteed {per_acct}/account, topped up toward {overall} overall)")
 
         drive_selected = binary_selected + native_selected
 

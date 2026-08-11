@@ -1,6 +1,6 @@
-# AI Labs Sample Set — Client Setup Guide
+# AI Labs Sample Set — End-to-End Setup Guide
 
-This guide builds a curated sample set in **your own Google Drive** (and, optionally, your own Gmail).
+This guide is self-contained — it does not assume you've set up or run anything else in this repo before. It builds a curated sample set in **your own Google Drive** (and, optionally, your own Gmail).
 
 It creates a new folder like `AI Labs Sample Set (YYYY-MM-DD)` in your My Drive, with subfolders by category, and copies the selected files into it. Gmail threads (if you build a manifest that includes them) go into your own Gmail Inbox instead.
 
@@ -8,21 +8,18 @@ You sign in with **your** Google account for the copy step. No shared folder and
 
 There are two roles in this guide:
 
-- **Client** — signs in with their own Google account and runs the copy steps (Parts 1, 2, 4, 6, 8). No admin access needed.
-- **Operator** — the person running the extraction for this engagement (Part 5). A Service Account with Domain-Wide Delegation is only needed if they're building a manifest across the **whole Workspace**; scanning just their own Drive + Gmail needs no extra setup at all.
-
-> **Already ran Inventory Segmentor on this machine?**  
-> Skip to [Part 4 — Google Drive login](#part-4--google-drive-login) if the project is already cloned and `.venv` works. Then jump to [Part 6 — Build the sample set](#part-6--build-the-sample-set).
+- **Client** — signs in with their own Google account and runs the copy steps (Parts 1, 2, 3, 4, 6, 8). No admin access needed.
+- **Operator** — the person running the extraction for this engagement (Part 5). A Service Account with Domain-Wide Delegation is only needed if they're building a manifest across the **whole Workspace**; scanning just their own Drive + Gmail needs no extra setup beyond Part 3/4.
 
 ---
 
 ## What you need
 
-- The **same Google account** you used when the Drive inventory was run
+- A Google account — the one whose Drive/Gmail you're building samples in
 - Python 3 and Git (steps below if you don't have them)
-- An OAuth client JSON file (often already set up from Inventory Segmentor — see Part 4)
-- **(Operator, Part 5 — whole-Workspace mode only)** A Service Account JSON with Domain-Wide Delegation, and a Workspace super-admin email — see `CLIENT_SETUP.md` → Part 4B. Not needed if scanning just your own Drive + Gmail.
-- **(Optional, Part 8 — Gmail thread samples)** The `gmail.insert` scope enabled on the OAuth client, added to its consent screen in Google Cloud Console
+- Access to [Google Cloud Console](https://console.cloud.google.com/) with that same Google account, to create an OAuth client (Part 3 — free, ~5 minutes, one time)
+- **(Operator, Part 5 — whole-Workspace mode only)** A Service Account JSON with Domain-Wide Delegation, and a Workspace super-admin email — covered in full in Part 5
+- **(Optional, Part 8 — Gmail thread samples)** The `gmail.insert` scope added to your OAuth client's consent screen — covered in full in Part 8
 
 **You do not need** an Anthropic / OpenAI / Gemini API key for any of this.
 
@@ -79,7 +76,7 @@ Confirm the clone worked:
 ls tools/build_quality_sample.py
 ```
 
-For most engagements, Part 5 below builds a **fresh** manifest by scanning live — that's what you'll actually use in Part 6, no Excel file needed. The repo also carries one legacy fixed list, `data/ai_labs_1200_balanced_sample.json`, kept only as a fallback default for Part 6 if Part 5 is skipped entirely.
+For most engagements, Part 5 below builds a **fresh** sample manifest by scanning live — that's what you'll actually use in Part 6. The repo also carries one legacy fixed list, `data/ai_labs_1200_balanced_sample.json`, kept only as a fallback default for Part 6 if Part 5 is skipped entirely.
 
 ---
 
@@ -119,53 +116,56 @@ pip install -r requirements.txt
 
 ---
 
-## Part 3 — (Optional) If you never set up Google Drive here
+## Part 3 — Create a Google Cloud OAuth client
 
-If you **already** completed Google Drive setup for Inventory Segmentor, skip to Part 4.
+This is the one-time Google Cloud Console setup that lets this tool sign in as you and access your Drive/Gmail. If someone already handed you a `client_secret_....json` file for this exact project, you can skip to Part 4 — otherwise, here's where it comes from:
 
-If this is a fresh machine:
+1. Go to **https://console.cloud.google.com/** and sign in with the Google account you'll use for this tool.
+2. **Create a project** — top-left project dropdown → **New Project** → give it any name (e.g. `AI Labs Sample Set`) → **Create**. Wait ~30 seconds for it to finish provisioning, then make sure it's selected in that same dropdown.
+3. **Enable the APIs you'll need** — left menu → **APIs & Services** → **Library**:
+   - Search **Google Drive API** → **Enable**
+   - Search **Gmail API** → **Enable** (skip this one only if you're certain you'll never use Part 8)
+4. **Configure the OAuth consent screen** — **APIs & Services** → **OAuth consent screen**:
+   - User type: **External** (unless this Google account belongs to a Google Workspace org you manage, in which case **Internal** also works) → **Create**
+   - Fill in **App name**, **User support email**, and **Developer contact email** (any values are fine — this app is only ever used by you) → **Save and Continue**
+   - **Scopes**: click **Add or Remove Scopes**, search for and check:
+     - `.../auth/drive` (full Drive access — needed to create the sample folder and copy files in Part 6)
+     - `.../auth/gmail.insert` (only if you'll use Part 8 — Gmail thread samples; you can add this later instead, see Part 8)
+     → **Update** → **Save and Continue**
+   - **Test users**: click **Add Users** and add the Google account you'll sign in with. This is required while the app is in **Testing** publish status — without it, sign-in will be blocked with an error → **Save and Continue** → **Back to Dashboard**
+5. **Create the OAuth client** — **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth client ID**:
+   - Application type: **Desktop app**
+   - Name it anything (e.g. `Inventory Segmentor`) → **Create**
+   - A dialog shows your client ID/secret — click **Download JSON**
+6. Save that downloaded file somewhere you can find it (e.g. your Downloads folder). You'll point the tool at it in Part 4.
+
+---
+
+## Part 4 — Connect the tool to your OAuth credentials
 
 ```
 python setup.py
 ```
 
-- When asked for an **API key**, press Enter to skip (not required for this tool).
-- When asked about **Google Drive**, type `y` and follow the prompts.
-- Point it at your OAuth client JSON (often in Downloads: `client_secret_....json`).
-- A browser window will open — sign in with the **same Google account** that owns the Drive inventory.
+- **API key** prompt → press Enter to skip (not needed for sampling).
+- **"Set up Google Drive access? (y/n)"** → type `y`.
+- **"Path to OAuth client JSON file"** → paste the path to the file you downloaded in Part 3, e.g.:
+  - Mac: `~/Downloads/client_secret_xxxx.json`
+  - Windows: `C:\Users\YourName\Downloads\client_secret_xxxx.json`
+- It copies that file to `.secrets/google_oauth_client.json` and asks to authorize now — type `y`. A browser tab opens; sign in with the same Google account and click **Allow**.
 
----
-
-## Part 4 — Google Drive login
-
-### Important
-
-Use the **same Google account** that was used to scan this Drive for the inventory.
-
-The sample list refers to file IDs from that Drive. A different account will get many failures (`404` / `403`).
-
-### First-time write access
-
-This tool needs permission to **create a folder and copy files** in your Drive (broader than the inventory's read-only login). The first run opens a browser — click **Allow**.
-
-Your OAuth client file should already be at something like:
-
-```
-.secrets/google_oauth_client.json
-```
-
-If setup put it elsewhere, that is fine as long as `.env` points to it (`GOOGLE_OAUTH_CLIENT_SECRETS=...`).
+> **Manual alternative**, if you'd rather not use the wizard: copy the downloaded JSON to `.secrets/google_oauth_client.json` yourself, or set `GOOGLE_OAUTH_CLIENT_SECRETS=/path/to/file.json` in `.env`.
 
 ---
 
 ## Part 5 — Build a fresh, size-capped sample manifest
 
-**Skip this part if you're the client running the bundled sample set — jump to Part 6.** This part is for whoever is running the extraction for the engagement.
+**Skip this part if you're the client running a manifest someone already built for you — jump to Part 6.** This part is for whoever is running the extraction for the engagement.
 
 `data/ai_labs_1200_balanced_sample.json` (used by default in Part 6) is a fixed, hand-picked list. `tools/build_quality_sample.py` instead scans live and builds a fresh manifest, in one of two modes — **picked automatically** depending on what auth you give it:
 
 - **Workspace mode** — pass `--service-account` + `--admin-email` (Domain-Wide Delegation): scans **every user's** My Drive + Shared Drives + Gmail across the whole org.
-- **My Drive mode** — run it with no service account: scans just **your own** Drive + Gmail, reusing the same OAuth tokens the rest of this repo's tools already use. If you've already signed in for Part 4 / a Gmail scan, no new login is needed; otherwise a browser opens once.
+- **My Drive mode** — run it with no service account: scans just **your own** Drive + Gmail, reusing the OAuth token from Part 4. If you haven't yet authorized Gmail access specifically, a browser opens once the first time it's needed.
 
 Either way, the manifest is built using two selection rules:
 
@@ -179,10 +179,33 @@ Either way, the manifest is built using two selection rules:
 
 Gmail messages are grouped into **whole threads** before selection — a thread is included or skipped as one unit, so a thread never gets split across the include/exclude line.
 
-### Prerequisite
+**In Workspace mode specifically**, both rules are applied *per account* first, so one large account can't crowd out everyone else:
 
-- **Workspace mode:** Service Account + Domain-Wide Delegation, already set up. If not, see `CLIENT_SETUP.md` → **Part 4B — Service Account with Domain-Wide Delegation** and come back here once you have the service account JSON path and a super-admin email.
-- **My Drive mode:** nothing extra — reuses whatever OAuth login you've already done (Part 4, or a prior Gmail scan). If neither token exists yet, a browser opens the first time each is needed.
+- **Binary files:** every account is guaranteed a small minimal slice of the 75GB (and 12.5GB Gmail) cap first — no account with data is ever fully shut out, even if its files are large and don't neatly fit a proportional share. Whatever's left of the cap is then filled in priority order (accounts with more data going first each round) until the cap is used up. In the typical case this means bigger accounts end up with proportionally more; in rare cases (very few accounts, or a cap barely bigger than one account's smallest file) the guarantee can cost a big account a bit of its edge — that trade-off is intentional so nobody gets zero.
+- **Native Sheets/Docs/Slides:** every account is guaranteed its own baseline first (most-recently-modified) — **30 Sheets, 40 Docs, 20 Slides per account** by default. If that guaranteed total is still under the overall target (350/300/150), the remainder is topped up with the next most-recently-modified files from anywhere in the Workspace. The per-account guarantee is never trimmed back down, so with enough accounts the final total can end up above the overall target — that's expected.
+
+In My Drive mode there's only one account, so both rules simplify back to the original global behavior.
+
+### Prerequisite for Workspace mode: Service Account + Domain-Wide Delegation
+
+Skip this whole box for My Drive mode — nothing extra is needed there beyond Part 3/4.
+
+**One-time admin setup (~10 minutes), done by a Workspace super-admin:**
+
+1. **Create a Service Account** — [Google Cloud Console](https://console.cloud.google.com/) → your project → **IAM & Admin** → **Service Accounts** → **Create Service Account** → give it any name (e.g. `inventory-scanner`) → **Create and Continue** → **Done**.
+2. Click the service account → **Keys** tab → **Add Key** → **Create new key** → **JSON**. The file downloads automatically — save it somewhere safe.
+3. **Enable Domain-Wide Delegation** — still on the service account page → **Details** tab → expand **Advanced settings** → copy the **Client ID** (a long number) → turn on **Domain-wide delegation** if there's a checkbox for it.
+4. **Authorize the scopes in Google Workspace Admin** — go to [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste the Client ID and add these three scopes (comma-separated):
+   ```
+   https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
+   ```
+   → **Authorise**. Propagation can take a few minutes — if the first run fails with `unauthorized_client` or `access_denied`, wait 5–10 minutes and retry.
+5. **Enable the APIs** — Cloud Console → **APIs & Services** → **Library** → enable **Google Drive API**, **Admin SDK API**, and **Gmail API**.
+6. Run the wizard to save the credentials:
+   ```
+   python setup.py
+   ```
+   When it asks `Set up Service Account for full workspace scan? (y/n)`, type `y`, paste the path to the service account JSON key, and paste your super-admin email (e.g. `admin@yourdomain.com` — a real Workspace user, not the service account's own email).
 
 ### Run it
 
@@ -206,11 +229,14 @@ This can take a while for a large Workspace — it caches scan progress under `o
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--drive-cap-gb` | `75` | Byte cap for binary Drive files, in GB |
-| `--gmail-cap-gb` | `12.5` | Gmail selection cap, in GB |
-| `--gsheets-limit` | `350` | Max Google Sheets, most-recently-modified first |
-| `--gdocs-limit` | `300` | Max Google Docs, most-recently-modified first |
-| `--gslides-limit` | `150` | Max Google Slides, most-recently-modified first |
+| `--drive-cap-gb` | `75` | Byte cap for binary Drive files, in GB (split across accounts by data volume in Workspace mode) |
+| `--gmail-cap-gb` | `12.5` | Gmail selection cap, in GB (same per-account split) |
+| `--gsheets-limit` | `350` | Overall target total for Google Sheets, most-recently-modified first |
+| `--gdocs-limit` | `300` | Overall target total for Google Docs |
+| `--gslides-limit` | `150` | Overall target total for Google Slides |
+| `--gsheets-per-account` | `30` | Google Sheets guaranteed per account (Workspace mode) |
+| `--gdocs-per-account` | `40` | Google Docs guaranteed per account (Workspace mode) |
+| `--gslides-per-account` | `20` | Google Slides guaranteed per account (Workspace mode) |
 | `--out` | `out/quality_sample_manifest.json` | Where the manifest is written |
 | `--gmail-query` | (none) | Gmail search query to filter candidate messages (e.g. `after:2024/01/01`) |
 | `--skip-drive` | off | Skip Drive scanning entirely |
@@ -316,9 +342,15 @@ their folder: https://drive.google.com/drive/folders/.........
 
 Only relevant if Part 5's manifest includes a `"gmail_threads"` list. This copies those threads — **whole threads, never split** — into your own Gmail Inbox, so Gmail re-threads them correctly on arrival.
 
-### One-time setup (operator, before first use)
+### One-time setup: add the `gmail.insert` scope
 
-The OAuth client used by this project needs the `gmail.insert` scope added to its **consent screen** in Google Cloud Console. If the app is still in **Testing** publish status, also add the signing-in Google account as a **test user** there. This is separate from the Drive scopes already in use and needs its own first-time consent.
+If you already checked this box in Part 3, skip ahead to **Copy the threads** below. Otherwise:
+
+1. [Google Cloud Console](https://console.cloud.google.com/) → your project → **APIs & Services** → **OAuth consent screen**.
+2. If you haven't already, enable the **Gmail API** first — **APIs & Services** → **Library** → search **Gmail API** → **Enable** (scopes for a disabled API won't show up in the next step).
+3. Back on the consent screen: **Edit App** → step through to **Scopes** → **Add or Remove Scopes** → search `gmail.insert` → check `.../auth/gmail.insert` → **Update** → **Save and Continue** through to the end.
+4. If the app is still in **Testing** publish status, also confirm the signing-in Google account is listed under **Test users** on that same screen — add it if it's missing.
+5. This is a new scope, separate from Drive — the **first time** you run the command below, a fresh browser consent prompt appears even if you already authorized Drive access in Part 4.
 
 ### Copy the threads
 
@@ -348,16 +380,17 @@ By default this reads `out/quality_sample_manifest.json` (Part 5's output); pass
 
 | Problem | What to do |
 | --- | --- |
-| Browser asks to sign in again | Use the **same** account that ran the Drive inventory |
-| Many `FAIL` / `404` / `notFound` | Wrong Google account, or files were deleted since the inventory |
-| Many `403` / permission errors | Sign in as the inventory account; confirm you can open those files in Drive normally |
-| `OAuth client secrets not found` | Re-run `python setup.py` and complete the Google Drive step, or place the client JSON under `.secrets/google_oauth_client.json` |
+| Browser asks to sign in again | Use the **same** account throughout Parts 3–8 |
+| Many `FAIL` / `404` / `notFound` | Wrong Google account, or files were deleted/moved since the manifest was built |
+| Many `403` / permission errors | Sign in as the account the manifest was built from; confirm you can open those files in Drive normally |
+| Google sign-in blocked with an "app not verified" / "access blocked" error | The signing-in account isn't in the OAuth consent screen's **Test users** list yet (Part 3, step 4) — add it there |
+| `OAuth client secrets not found` | Complete Part 3 (create the OAuth client) and Part 4 (`python setup.py`, Google Drive step), or place the client JSON under `.secrets/google_oauth_client.json` |
 | `sample manifest not found` | Update/pull the latest code so `data/ai_labs_1200_balanced_sample.json` exists, or check the `--manifest` path |
 | Interrupted halfway | Re-run the same command — both `export_ai_labs_samples.py` and `export_ai_labs_gmail_threads.py` resume automatically |
 | Want a fresh destination folder | Delete `out/ai_labs_samples.checkpoint.jsonl` and `out/ai_labs_samples.checkpoint.jsonl.dest.json`, then run again |
 | `build_quality_sample.py`: `--admin-email is required with --service-account` | You passed `--service-account` but not `--admin-email` — add it, or drop `--service-account` entirely to scan just your own Drive + Gmail instead |
 | Manifest has no `gmail_threads` / Part 8 finds nothing | Run Part 5 first (with Gmail not skipped), or point `--manifest` at a manifest that has one |
-| Gmail insert fails with a permissions / consent screen error | `gmail.insert` scope isn't on the OAuth client's consent screen yet, or (Testing mode) the account isn't added as a test user — operator needs to fix this in Cloud Console |
+| Gmail insert fails with a permissions / consent screen error | `gmail.insert` scope isn't on the OAuth client's consent screen yet — do Part 8's one-time setup, including the Test users check |
 
 ---
 
