@@ -55,6 +55,8 @@ if str(_ROOT) not in sys.path:
 
 import env_loader  # noqa: F401
 
+from googleapiclient.errors import HttpError
+
 from gdrive.credentials import (
     SCOPES_ADMIN_USERS,
     SCOPES_GMAIL,
@@ -68,8 +70,28 @@ from gdrive.credentials import (
     get_credentials,
     get_service_account_credentials,
 )
-from gdrive.scan import list_shared_drives, list_workspace_users, walk_all_user_my_drives, walk_entire_workspace
+from gdrive.scan import (
+    list_shared_drives,
+    list_workspace_users,
+    normalize_folder_id,
+    walk_all_user_my_drives,
+    walk_drive_folder,
+    walk_entire_workspace,
+    walk_my_drive_in_rounds,
+)
+from gmail.fetch import fetch_thread_raw
 from gmail.scan import fetch_message_meta, scan_mailbox
+from tools.export_ai_labs_gmail_threads import _get_insert_credentials, _insert_message
+from tools.export_ai_labs_samples import (
+    _append_done,
+    _create_root_folder,
+    _drive_copy,
+    _ensure_child_folder,
+    _get_rw_credentials,
+    _load_dest_meta,
+    _load_done,
+    _save_dest_meta,
+)
 
 _GMAIL_TOKEN = _ROOT / ".secrets" / "gmail_token.json"
 
@@ -129,10 +151,12 @@ def select_top_by_recency(rows: list[dict[str, Any]], limit: int) -> list[dict[s
     return ordered[:limit]
 
 
-def _group_by_account(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _group_by_account(
+    rows: list[dict[str, Any]], key: str = "owner_email",
+) -> dict[str, list[dict[str, Any]]]:
     by_account: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        by_account.setdefault(r.get("owner_email") or "", []).append(r)
+        by_account.setdefault(r.get(key) or "", []).append(r)
     return by_account
 
 
@@ -233,6 +257,38 @@ def allocate_binary_by_account(
     return selected, total_selected
 
 
+def allocate_equally_by_account(
+    candidates: list[dict[str, Any]], cap_bytes: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Split ``cap_bytes`` equally across accounts — every account gets the same
+    share, not weighted by its own data volume (unlike ``allocate_binary_by_account``)
+    — then greedy-fill each account's own share largest-first. A leftover-reclaim pass
+    mops up any cap a share couldn't use, same fix as ``allocate_binary_by_account``,
+    so the cap doesn't go to waste when one account's items don't fit its share evenly.
+    """
+    by_account = _group_by_account(candidates, key="user_email")
+    if not by_account:
+        return [], 0
+
+    equal_share = cap_bytes // len(by_account)
+    selected: list[dict[str, Any]] = []
+    total_selected = 0
+    for acct_rows in by_account.values():
+        acct_selected, acct_total = greedy_fill(acct_rows, equal_share)
+        selected.extend(acct_selected)
+        total_selected += acct_total
+
+    leftover_cap = cap_bytes - total_selected
+    if leftover_cap > 0:
+        selected_keys = {(r["user_email"], r["thread_id"]) for r in selected}
+        remaining = [r for r in candidates if (r["user_email"], r["thread_id"]) not in selected_keys]
+        topup, topup_total = greedy_fill(remaining, leftover_cap)
+        selected.extend(topup)
+        total_selected += topup_total
+
+    return selected, total_selected
+
+
 def _bucket_drive_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     native_by_mime = {MIME_GSHEET: "gsheets", MIME_GDOC: "gdocs", MIME_GSLIDES: "gslides"}
     buckets: dict[str, list[dict[str, Any]]] = {"binary": [], "gsheets": [], "gdocs": [], "gslides": []}
@@ -259,9 +315,97 @@ def _bucket_drive_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, A
     return buckets
 
 
+_EARLY_STOP_SAFETY_MULTIPLIER = 3  # e.g. gsheets-per-account=30 -> stop once 90 found
+
+
+def _account_has_enough(
+    buckets: dict[str, list[dict[str, Any]]],
+    *,
+    gsheets_per_account: int,
+    gdocs_per_account: int,
+    gslides_per_account: int,
+    drive_cap_bytes: int,
+) -> bool:
+    """True once an account's accumulated candidates comfortably exceed what the
+    existing per-account targets could ever need — used to stop scanning that account
+    early rather than walking its entire Drive exhaustively."""
+    native_ok = (
+        len(buckets["gsheets"]) >= gsheets_per_account * _EARLY_STOP_SAFETY_MULTIPLIER
+        and len(buckets["gdocs"]) >= gdocs_per_account * _EARLY_STOP_SAFETY_MULTIPLIER
+        and len(buckets["gslides"]) >= gslides_per_account * _EARLY_STOP_SAFETY_MULTIPLIER
+    )
+    binary_ok = sum(r["size_bytes"] for r in buckets["binary"]) >= drive_cap_bytes
+    return native_ok and binary_ok
+
+
+def _scan_account_in_rounds(
+    service,
+    path_prefix: str,
+    *,
+    folders_per_round: int,
+    modified_before: str | None,
+    gsheets_per_account: int,
+    gdocs_per_account: int,
+    gslides_per_account: int,
+    drive_cap_bytes: int,
+    progress_log=_log,
+) -> dict[str, list[dict[str, Any]]]:
+    """Scan one account's My Drive in rounds of ``folders_per_round`` folders, stopping
+    early once ``_account_has_enough`` is satisfied instead of walking exhaustively."""
+    buckets: dict[str, list[dict[str, Any]]] = {"binary": [], "gsheets": [], "gdocs": [], "gslides": []}
+    frontier = None
+    round_num = 0
+    while True:
+        round_num += 1
+        batch_rows, frontier = walk_my_drive_in_rounds(
+            service, path_prefix=path_prefix, frontier=frontier,
+            folder_budget=folders_per_round, modified_before=modified_before,
+            progress_log=progress_log,
+        )
+        batch_buckets = _bucket_drive_rows(batch_rows)
+        for kind in buckets:
+            buckets[kind].extend(batch_buckets[kind])
+        if not frontier:
+            break
+        if _account_has_enough(
+            buckets, gsheets_per_account=gsheets_per_account, gdocs_per_account=gdocs_per_account,
+            gslides_per_account=gslides_per_account, drive_cap_bytes=drive_cap_bytes,
+        ):
+            progress_log(
+                f"[drive] enough found after {round_num} round(s) of {folders_per_round} folders — "
+                f"stopping early, {len(frontier)} folder(s) left unscanned"
+            )
+            break
+    return buckets
+
+
+def _merge_buckets(into: dict[str, list[dict[str, Any]]], other: dict[str, list[dict[str, Any]]]) -> None:
+    for kind in into:
+        into[kind].extend(other[kind])
+
+
+def _walk_shared_drives_exhaustively(
+    shared: list[dict[str, Any]], service, *, modified_before: str | None, progress_log,
+) -> dict[str, list[dict[str, Any]]]:
+    """Shared Drives are always walked exhaustively — round-based early-stop only
+    applies per individually-owned account (confirmed scope), not shared/team drives."""
+    buckets: dict[str, list[dict[str, Any]]] = {"binary": [], "gsheets": [], "gdocs": [], "gslides": []}
+    for drv in shared:
+        did = drv["id"]
+        dname = drv.get("name") or did
+        progress_log(f"[drive] Shared Drive → {dname!r}")
+        rows = walk_drive_folder(
+            service, did, path_prefix=dname, modified_before=modified_before, progress_log=progress_log,
+        )
+        _merge_buckets(buckets, _bucket_drive_rows(rows))
+    return buckets
+
+
 def collect_drive_candidates_workspace(
     *, sa_file: Path, admin_email: str, scan_cache: str, users: list[str] | None = None,
-    modified_before: str | None = None, progress_log=_log,
+    modified_before: str | None = None, folders_per_round: int = 0,
+    gsheets_per_account: int = 30, gdocs_per_account: int = 40, gslides_per_account: int = 20,
+    drive_cap_bytes: int = 0, progress_log=_log,
 ) -> dict[str, list[dict[str, Any]]]:
     """Every user's My Drive + every Shared Drive (Domain-Wide Delegation).
 
@@ -270,6 +414,10 @@ def collect_drive_candidates_workspace(
 
     ``modified_before`` (RFC3339), if given, excludes files modified on or after it —
     folders are still always traversed regardless of their own modified time.
+
+    ``folders_per_round`` > 0 switches each user's My Drive to round-based scanning
+    (see ``_scan_account_in_rounds``) instead of an exhaustive walk. Shared Drives are
+    always walked exhaustively either way.
     """
     if users is None:
         admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
@@ -288,6 +436,27 @@ def collect_drive_candidates_workspace(
         u_creds = get_service_account_credentials(sa_file, email, SCOPES_READONLY)
         return build_drive_service(u_creds)
 
+    if folders_per_round > 0:
+        buckets: dict[str, list[dict[str, Any]]] = {"binary": [], "gsheets": [], "gdocs": [], "gslides": []}
+        for email in users:
+            progress_log(f"[drive] My Drive → {email} (round-based, {folders_per_round} folders/round)")
+            svc = _user_drive_service(email)
+            acct_buckets = _scan_account_in_rounds(
+                svc, f"My Drive ({email})", folders_per_round=folders_per_round,
+                modified_before=modified_before, gsheets_per_account=gsheets_per_account,
+                gdocs_per_account=gdocs_per_account, gslides_per_account=gslides_per_account,
+                drive_cap_bytes=drive_cap_bytes, progress_log=progress_log,
+            )
+            _merge_buckets(buckets, acct_buckets)
+        _merge_buckets(
+            buckets,
+            _walk_shared_drives_exhaustively(
+                shared, admin_drive_svc, modified_before=modified_before, progress_log=progress_log,
+            ),
+        )
+        progress_log("[drive] round-based scan complete")
+        return buckets
+
     rows = walk_all_user_my_drives(
         _user_drive_service,
         users,
@@ -302,11 +471,28 @@ def collect_drive_candidates_workspace(
 
 
 def collect_drive_candidates_single(
-    *, service, scan_cache: str, modified_before: str | None = None, progress_log=_log,
+    *, service, scan_cache: str, modified_before: str | None = None, folders_per_round: int = 0,
+    gsheets_per_account: int = 30, gdocs_per_account: int = 40, gslides_per_account: int = 20,
+    drive_cap_bytes: int = 0, progress_log=_log,
 ) -> dict[str, list[dict[str, Any]]]:
     """Just the signed-in account's own My Drive + Shared Drives it can see."""
     shared = list_shared_drives(service)
     progress_log(f"[drive] {len(shared)} Shared Drive(s) visible to this account")
+
+    if folders_per_round > 0:
+        buckets = _scan_account_in_rounds(
+            service, "My Drive", folders_per_round=folders_per_round, modified_before=modified_before,
+            gsheets_per_account=gsheets_per_account, gdocs_per_account=gdocs_per_account,
+            gslides_per_account=gslides_per_account, drive_cap_bytes=drive_cap_bytes,
+            progress_log=progress_log,
+        )
+        _merge_buckets(
+            buckets,
+            _walk_shared_drives_exhaustively(shared, service, modified_before=modified_before, progress_log=progress_log),
+        )
+        progress_log("[drive] round-based scan complete")
+        return buckets
+
     rows = walk_entire_workspace(
         service,
         include_my_drive=True,
@@ -333,6 +519,35 @@ def add_to_thread(by_thread: dict[tuple[str, str], dict[str, Any]], email: str, 
     entry["message_ids"].append(meta["message_id"])
 
 
+def _load_message_meta_cache(cache_path: Path) -> dict[str, dict[str, Any]]:
+    """Resume support for the per-message metadata fetch loop below — a long scan can
+    run for hours and hit a transient outage that outlasts even the retry budget in
+    fetch_message_meta; without this, a crash at message 14,000/133,853 would throw
+    away all of that work on the next run."""
+    cached: dict[str, dict[str, Any]] = {}
+    if not cache_path.is_file():
+        return cached
+    with cache_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            mid = row.get("message_id")
+            if mid:
+                cached[mid] = row
+    return cached
+
+
+def _append_message_meta_cache(cache_path: Path, meta: dict[str, Any]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with cache_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(meta, ensure_ascii=False) + "\n")
+
+
 def collect_gmail_candidates(
     *,
     get_user_service: Callable[[str], Any],
@@ -345,13 +560,23 @@ def collect_gmail_candidates(
     by_thread: dict[tuple[str, str], dict[str, Any]] = {}
     for email in users:
         svc = get_user_service(email)
-        cache_path = scan_cache_dir / f"gmail_ids__{email.replace('@', '_at_')}{cache_suffix}.txt"
+        safe_email = email.replace("@", "_at_")
+        cache_path = scan_cache_dir / f"gmail_ids__{safe_email}{cache_suffix}.txt"
         ids = scan_mailbox(
             svc, email, query=gmail_query, progress_log=progress_log,
             scan_cache_path=str(cache_path),
         )
+
+        meta_cache_path = scan_cache_dir / f"gmail_meta__{safe_email}{cache_suffix}.jsonl"
+        meta_cache = _load_message_meta_cache(meta_cache_path)
+        if meta_cache:
+            progress_log(f"[gmail] {email}: resuming from {len(meta_cache)} cached message(s)")
+
         for i, mid in enumerate(ids, start=1):
-            meta = fetch_message_meta(svc, mid, user_id=email)
+            meta = meta_cache.get(mid)
+            if meta is None:
+                meta = fetch_message_meta(svc, mid, user_id=email)
+                _append_message_meta_cache(meta_cache_path, meta)
             add_to_thread(by_thread, email, meta)
             if progress_log and i % 500 == 0:
                 progress_log(f"[gmail] {email}: {i}/{len(ids)} message(s) scanned")
@@ -401,6 +626,125 @@ def my_gmail_service():
     return service, email
 
 
+def transfer_selection_by_account(
+    drive_selected: list[dict[str, Any]],
+    gmail_selected: list[dict[str, Any]],
+    *,
+    folder_name: str,
+    dest_folder_id: str,
+    checkpoint_dir: Path,
+    get_source_gmail_service: Callable[[str], Any],
+    progress_log=_log,
+) -> None:
+    """Copy the finalized selection into the destination sample folder — **all** Drive
+    files first (largest account first), then **all** Gmail threads (largest account
+    first) — so Drive samples are fully ready before Gmail transfer even starts, rather
+    than interleaving the two per account. Runs right after scan+select finishes (or
+    after resuming from an existing manifest), so there's no separate manual export
+    step. Reuses the same checkpointed copy/insert logic as the standalone
+    export_ai_labs_samples.py / export_ai_labs_gmail_threads.py scripts, so an
+    interrupted transfer resumes exactly like they do — this doesn't reimplement that
+    logic.
+    """
+    drive_by_account = _group_by_account(drive_selected)
+    gmail_by_account = _group_by_account(gmail_selected, key="user_email")
+    if not drive_by_account and not gmail_by_account:
+        progress_log("[transfer] nothing selected — skipping")
+        return
+
+    def _by_size_desc(by_account: dict[str, list[dict[str, Any]]]) -> list[str]:
+        return sorted(by_account, key=lambda e: -sum(r["size_bytes"] for r in by_account[e]))
+
+    ckpt = checkpoint_dir / "ai_labs_samples.checkpoint.jsonl"
+    gmail_ckpt = checkpoint_dir / "ai_labs_gmail_threads.checkpoint.jsonl"
+
+    if drive_selected:
+        drive_creds = _get_rw_credentials()
+        drive_service = build_drive_service(drive_creds)
+
+        dest_meta = _load_dest_meta(ckpt)
+        if dest_folder_id.strip():
+            dest_id = normalize_folder_id(dest_folder_id)
+            progress_log(f"[transfer] using existing dest folder id={dest_id}")
+        elif dest_meta and dest_meta.get("dest_folder_id"):
+            dest_id = str(dest_meta["dest_folder_id"])
+            folder_name = str(dest_meta.get("folder_name") or folder_name)
+            progress_log(f"[transfer] resuming into existing folder {folder_name!r} → {dest_id}")
+        else:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if folder_name == "AI Labs Sample Set":
+                folder_name = f"{folder_name} ({stamp})"
+            dest_id = _create_root_folder(drive_service, folder_name, parent_id="root")
+            progress_log(f"[transfer] created My Drive folder {folder_name!r} → {dest_id}")
+        _save_dest_meta(ckpt, dest_id, folder_name)
+
+        drive_done = _load_done(ckpt)
+        folder_cache: dict[str, str] = {}
+        drive_accounts = _by_size_desc(drive_by_account)
+        progress_log(f"[transfer] Drive: {len(drive_accounts)} account(s), largest first")
+
+        for email in drive_accounts:
+            d_ok = d_skip = d_fail = 0
+            for row in drive_by_account[email]:
+                fid = row["file_id"]
+                if fid in drive_done:
+                    d_skip += 1
+                    continue
+                try:
+                    parent = _ensure_child_folder(drive_service, dest_id, email, folder_cache)
+                    new_id = _drive_copy(drive_service, fid, parent, row["name"])
+                    _append_done(ckpt, {
+                        "file_id": fid, "new_id": new_id, "bucket": email,
+                        "name": row["name"], "path": row["path"], "mode": "copy", "status": "ok",
+                    })
+                    d_ok += 1
+                except (HttpError, RuntimeError, OSError) as exc:
+                    d_fail += 1
+                    _append_done(ckpt, {
+                        "file_id": fid, "bucket": email, "name": row["name"], "path": row["path"],
+                        "status": "error", "error": str(exc)[:500],
+                    })
+                    progress_log(f"[transfer] FAIL drive {row['name'][:60]!r} — {exc}")
+            progress_log(f"[transfer] drive {email}: done — ok={d_ok} skip={d_skip} fail={d_fail}")
+
+        progress_log(f"[transfer] Drive done — folder: https://drive.google.com/drive/folders/{dest_id}")
+
+    if gmail_selected:
+        gmail_dest_service = build_gmail_service(_get_insert_credentials())
+        gmail_done = _load_done(gmail_ckpt)
+        gmail_accounts = _by_size_desc(gmail_by_account)
+        progress_log(f"[transfer] Gmail: {len(gmail_accounts)} account(s), largest first")
+
+        for email in gmail_accounts:
+            g_ok = g_skip = g_fail = 0
+            for row in gmail_by_account[email]:
+                thread_key = f"{email}:{row['thread_id']}"
+                if thread_key in gmail_done:
+                    g_skip += 1
+                    continue
+                try:
+                    src_service = get_source_gmail_service(email)
+                    raw_messages = fetch_thread_raw(src_service, row["thread_id"], user_id=email)
+                    inserted_ids = [_insert_message(gmail_dest_service, raw) for raw in raw_messages]
+                    _append_done(gmail_ckpt, {
+                        "file_id": thread_key, "thread_id": row["thread_id"], "user_email": email,
+                        "inserted_ids": inserted_ids, "status": "ok",
+                    })
+                    g_ok += 1
+                except (HttpError, RuntimeError, OSError) as exc:
+                    g_fail += 1
+                    _append_done(gmail_ckpt, {
+                        "file_id": thread_key, "thread_id": row["thread_id"], "user_email": email,
+                        "status": "error", "error": str(exc)[:500],
+                    })
+                    progress_log(f"[transfer] FAIL gmail {row.get('subject', '')[:60]!r} — {exc}")
+            progress_log(f"[transfer] gmail {email}: done — ok={g_ok} skip={g_skip} fail={g_fail}")
+
+        progress_log("[transfer] Gmail done")
+
+    progress_log("[transfer] finished")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--drive-cap-gb", type=float, default=75.0,
@@ -420,9 +764,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--gslides-per-account", type=int, default=20,
                     help="Google Slides guaranteed per account (default: 20)")
     p.add_argument("--out", default="out/quality_sample_manifest.json", help="Output manifest path")
+    p.add_argument("--rescan", action="store_true",
+                    help="Force a fresh scan even if --out already exists (default: reuse it and "
+                         "skip straight to transferring)")
+    p.add_argument("--scan-only", action="store_true",
+                    help="Stop after writing the manifest — don't transfer into the destination "
+                         "sample folder (transferring is the default)")
+    p.add_argument("--folder-name", default="AI Labs Sample Set",
+                    help="Destination My Drive folder name (default: 'AI Labs Sample Set'; "
+                         "date suffix added automatically)")
+    p.add_argument("--dest-folder-id", default="",
+                    help="Optional existing destination folder ID/URL instead of creating a new one")
     p.add_argument("--gmail-query", default="", help="Optional Gmail search query to filter messages")
     p.add_argument("--before", default="", metavar="YYYY-MM-DD",
                     help="Only scan Drive files and Gmail messages dated before this date")
+    p.add_argument("--folders-per-round", type=int, default=0, metavar="N",
+                    help="Scan each account's Drive in rounds of N folders, stopping early once "
+                         "it has enough candidates for the configured targets (0 = disabled, scan "
+                         "every folder exhaustively — default). Speeds up huge workspaces at the "
+                         "cost of a small chance of missing a marginally-better file in an "
+                         "unscanned folder. Shared Drives are always scanned exhaustively.")
     p.add_argument("--skip-drive", action="store_true", help="Skip Drive scanning/selection")
     p.add_argument("--skip-gmail", action="store_true", help="Skip Gmail scanning/selection")
     sa_default = str(default_service_account_path()) if default_service_account_path() else ""
@@ -474,87 +835,128 @@ def main(argv: list[str] | None = None) -> int:
     drive_cap_bytes = int(args.drive_cap_gb * GB)
     gmail_cap_bytes = int(args.gmail_cap_gb * GB)
 
-    drive_selected: list[dict[str, Any]] = []
-    drive_total = 0
-    native_counts = {"gsheets": 0, "gdocs": 0, "gslides": 0}
-    if not args.skip_drive:
-        cache_suffix = f".before_{args.before}" if args.before else ""
-        drive_scan_cache = str(scan_cache_dir / (out_path.stem + cache_suffix + ".drive_scan_cache.jsonl"))
-        if workspace_mode:
-            buckets = collect_drive_candidates_workspace(
-                sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache,
-                users=selected_users or None, modified_before=drive_before, progress_log=_log,
-            )
-        else:
-            buckets = collect_drive_candidates_single(
-                service=my_drive_service(), scan_cache=drive_scan_cache,
-                modified_before=drive_before, progress_log=_log,
-            )
-        binary_selected, drive_total = allocate_binary_by_account(buckets["binary"], drive_cap_bytes)
-        n_accounts = len({r.get("owner_email") or "" for r in buckets["binary"]})
-        _log(f"[drive] binary files: selected {len(binary_selected)}/{len(buckets['binary'])} "
-             f"across {n_accounts} account(s), {drive_total / GB:.2f}GB / {args.drive_cap_gb:.2f}GB cap")
-
-        native_limits = {
-            "gsheets": (args.gsheets_per_account, args.gsheets_limit),
-            "gdocs": (args.gdocs_per_account, args.gdocs_limit),
-            "gslides": (args.gslides_per_account, args.gslides_limit),
-        }
-        native_selected: list[dict[str, Any]] = []
-        for kind, (per_acct, overall) in native_limits.items():
-            picked = select_native_by_account(buckets[kind], per_account_limit=per_acct, overall_cap=overall)
-            native_counts[kind] = len(picked)
-            native_selected.extend(picked)
-            _log(f"[drive] {kind}: selected {len(picked)}/{len(buckets[kind])} "
-                 f"(guaranteed {per_acct}/account, topped up toward {overall} overall)")
-
-        drive_selected = binary_selected + native_selected
-
-    gmail_selected: list[dict[str, Any]] = []
-    gmail_total = 0
-    if not args.skip_gmail:
-        if workspace_mode:
-            if selected_users:
-                gmail_users = selected_users
+    resumed = False
+    if out_path.is_file() and not args.rescan:
+        try:
+            manifest = json.loads(out_path.read_text(encoding="utf-8"))
+            drive_selected = manifest.get("files", [])
+            gmail_selected = manifest.get("gmail_threads", [])
+            resumed = True
+            _log(f"[resume] using existing manifest {out_path} — {len(drive_selected)} file(s), "
+                 f"{len(gmail_selected)} gmail thread(s) — skipping scan (pass --rescan to force a fresh scan)")
+        except (json.JSONDecodeError, OSError) as exc:
+            _log(f"[resume] WARNING: {out_path} exists but couldn't be read ({exc}) — "
+                 f"treating it as missing and running a fresh scan")
+    if not resumed:
+        drive_selected: list[dict[str, Any]] = []
+        drive_total = 0
+        native_counts = {"gsheets": 0, "gdocs": 0, "gslides": 0}
+        if not args.skip_drive:
+            cache_suffix = f".before_{args.before}" if args.before else ""
+            drive_scan_cache = str(scan_cache_dir / (out_path.stem + cache_suffix + ".drive_scan_cache.jsonl"))
+            if workspace_mode:
+                buckets = collect_drive_candidates_workspace(
+                    sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache,
+                    users=selected_users or None, modified_before=drive_before,
+                    folders_per_round=args.folders_per_round,
+                    gsheets_per_account=args.gsheets_per_account, gdocs_per_account=args.gdocs_per_account,
+                    gslides_per_account=args.gslides_per_account, drive_cap_bytes=drive_cap_bytes,
+                    progress_log=_log,
+                )
             else:
-                admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
-                admin_svc = build_admin_service(admin_sdk_creds)
-                gmail_users = list_workspace_users(admin_svc)
+                buckets = collect_drive_candidates_single(
+                    service=my_drive_service(), scan_cache=drive_scan_cache,
+                    modified_before=drive_before, folders_per_round=args.folders_per_round,
+                    gsheets_per_account=args.gsheets_per_account, gdocs_per_account=args.gdocs_per_account,
+                    gslides_per_account=args.gslides_per_account, drive_cap_bytes=drive_cap_bytes,
+                    progress_log=_log,
+                )
+            binary_selected, drive_total = allocate_binary_by_account(buckets["binary"], drive_cap_bytes)
+            n_accounts = len({r.get("owner_email") or "" for r in buckets["binary"]})
+            _log(f"[drive] binary files: selected {len(binary_selected)}/{len(buckets['binary'])} "
+                 f"across {n_accounts} account(s), {drive_total / GB:.2f}GB / {args.drive_cap_gb:.2f}GB cap")
 
-            def _gmail_service_for(email: str):
-                creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
-                return build_gmail_service(creds)
-        else:
-            single_gmail_svc, my_email = my_gmail_service()
-            gmail_users = [my_email]
-            _gmail_service_for = lambda _email: single_gmail_svc  # noqa: E731 — same account for every "user"
+            native_limits = {
+                "gsheets": (args.gsheets_per_account, args.gsheets_limit),
+                "gdocs": (args.gdocs_per_account, args.gdocs_limit),
+                "gslides": (args.gslides_per_account, args.gslides_limit),
+            }
+            native_selected: list[dict[str, Any]] = []
+            for kind, (per_acct, overall) in native_limits.items():
+                picked = select_native_by_account(buckets[kind], per_account_limit=per_acct, overall_cap=overall)
+                native_counts[kind] = len(picked)
+                native_selected.extend(picked)
+                _log(f"[drive] {kind}: selected {len(picked)}/{len(buckets[kind])} "
+                     f"(guaranteed {per_acct}/account, topped up toward {overall} overall)")
 
-        gmail_candidates = collect_gmail_candidates(
-            get_user_service=_gmail_service_for, users=gmail_users, gmail_query=gmail_query,
-            scan_cache_dir=scan_cache_dir, cache_suffix=f"__before_{args.before}" if args.before else "",
-            progress_log=_log,
-        )
-        gmail_selected, gmail_total = greedy_fill(gmail_candidates, gmail_cap_bytes)
-        _log(f"[gmail] selected {len(gmail_selected)}/{len(gmail_candidates)} thread(s), "
-             f"{gmail_total / GB:.2f}GB / {args.gmail_cap_gb:.2f}GB cap")
+            drive_selected = binary_selected + native_selected
 
-    manifest = {
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "scan_mode": "workspace" if workspace_mode else "my_drive",
-        "drive_cap_bytes": drive_cap_bytes,
-        "drive_total_bytes": drive_total,
-        "drive_native_selected": native_counts,
-        "gmail_cap_bytes": gmail_cap_bytes,
-        "gmail_total_bytes": gmail_total,
-        "files": [
-            {"file_id": c["file_id"], "name": c["name"], "path": c["path"], "size_bytes": c["size_bytes"],
-             "owner_email": c["owner_email"]}
-            for c in drive_selected
-        ],
-        "gmail_threads": gmail_selected,
-    }
-    out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    _log(f"manifest written: {out_path} (files={len(drive_selected)} gmail_threads={len(gmail_selected)})")
+        gmail_selected: list[dict[str, Any]] = []
+        gmail_total = 0
+        if not args.skip_gmail:
+            if workspace_mode:
+                if selected_users:
+                    gmail_users = selected_users
+                else:
+                    admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
+                    admin_svc = build_admin_service(admin_sdk_creds)
+                    gmail_users = list_workspace_users(admin_svc)
+
+                def _gmail_service_for(email: str):
+                    creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
+                    return build_gmail_service(creds)
+            else:
+                single_gmail_svc, my_email = my_gmail_service()
+                gmail_users = [my_email]
+                _gmail_service_for = lambda _email: single_gmail_svc  # noqa: E731 — same account for every "user"
+
+            gmail_candidates = collect_gmail_candidates(
+                get_user_service=_gmail_service_for, users=gmail_users, gmail_query=gmail_query,
+                scan_cache_dir=scan_cache_dir, cache_suffix=f"__before_{args.before}" if args.before else "",
+                progress_log=_log,
+            )
+            gmail_selected, gmail_total = allocate_equally_by_account(gmail_candidates, gmail_cap_bytes)
+            n_gmail_accounts = len({r["user_email"] for r in gmail_candidates})
+            _log(f"[gmail] selected {len(gmail_selected)}/{len(gmail_candidates)} thread(s) "
+                 f"across {n_gmail_accounts} account(s) (equal split), "
+                 f"{gmail_total / GB:.2f}GB / {args.gmail_cap_gb:.2f}GB cap")
+
+        manifest = {
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "scan_mode": "workspace" if workspace_mode else "my_drive",
+            "drive_cap_bytes": drive_cap_bytes,
+            "drive_total_bytes": drive_total,
+            "drive_native_selected": native_counts,
+            "gmail_cap_bytes": gmail_cap_bytes,
+            "gmail_total_bytes": gmail_total,
+            "files": [
+                {"file_id": c["file_id"], "name": c["name"], "path": c["path"], "size_bytes": c["size_bytes"],
+                 "owner_email": c["owner_email"]}
+                for c in drive_selected
+            ],
+            "gmail_threads": gmail_selected,
+        }
+        out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _log(f"manifest written: {out_path} (files={len(drive_selected)} gmail_threads={len(gmail_selected)})")
+
+    if args.scan_only:
+        return 0
+
+    if workspace_mode:
+        def _source_gmail_service(email: str):
+            creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
+            return build_gmail_service(creds)
+    else:
+        def _source_gmail_service(_email: str):
+            svc, _ = my_gmail_service()
+            return svc
+
+    transfer_selection_by_account(
+        drive_selected, gmail_selected,
+        folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,
+        checkpoint_dir=scan_cache_dir, get_source_gmail_service=_source_gmail_service,
+        progress_log=_log,
+    )
     return 0
 
 

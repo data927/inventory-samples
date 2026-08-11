@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from googleapiclient.errors import HttpError
+
+from gdrive.fetch import _sleep_backoff
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -42,24 +47,31 @@ def normalize_folder_id(raw: str) -> str:
     return s.split("?")[0].split("/")[0]
 
 
-def _list_children(service, folder_id: str) -> list[dict[str, Any]]:
+def _list_children(service, folder_id: str, *, max_retries: int = 8) -> list[dict[str, Any]]:
     q = f"'{folder_id}' in parents and trashed = false"
     out: list[dict[str, Any]] = []
     page_token: str | None = None
     while True:
-        resp = (
-            service.files()
-            .list(
-                q=q,
-                pageSize=200,
-                fields=_LIST_FIELDS,
-                pageToken=page_token,
-                corpora="allDrives",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-            )
-            .execute()
-        )
+        for attempt in range(max_retries + 1):
+            try:
+                resp = (
+                    service.files()
+                    .list(
+                        q=q,
+                        pageSize=200,
+                        fields=_LIST_FIELDS,
+                        pageToken=page_token,
+                        corpora="allDrives",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
+                )
+                break
+            except HttpError as e:
+                if attempt >= max_retries or e.resp.status not in (403, 429, 500, 503):
+                    raise
+                _sleep_backoff(attempt, e)
         out.extend(resp.get("files") or [])
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -226,6 +238,67 @@ def walk_drive_folder(
             progress_log(f"[scan_cache] saved {len(rows)} rows to {cache_path}")
 
     return rows
+
+
+def walk_my_drive_in_rounds(
+    service,
+    *,
+    path_prefix: str = "",
+    frontier: deque[tuple[str, str]] | list[tuple[str, str]] | None = None,
+    folder_budget: int,
+    modified_before: str | None = None,
+    progress_log: Callable[[str], None] | None = None,
+) -> tuple[list[dict[str, Any]], deque[tuple[str, str]]]:
+    """Breadth-first walk, visiting at most ``folder_budget`` folders this call.
+
+    Returns ``(file_rows_found_this_round, remaining_frontier)``. An empty
+    ``remaining_frontier`` means the walk is complete. Call again passing the returned
+    frontier (as ``frontier=``) to continue in the next round from exactly where this
+    call left off — nothing is re-visited or skipped across rounds.
+
+    Purpose-built for round-based, early-stoppable scanning of one account at a time
+    (see ``tools/build_quality_sample.py``) — unlike ``walk_drive_folder`` this has no
+    ``scan_cache_path``/``max_files``/``include_folders`` support, since round-based
+    scanning is fast by design and only ever needs file rows.
+
+    ``modified_before`` (RFC3339), if given, excludes files modified on or after it —
+    folders are still always traversed regardless of their own modified time, same as
+    ``walk_drive_folder``.
+    """
+    if frontier is None:
+        frontier = deque([("root", path_prefix)])
+    elif not isinstance(frontier, deque):
+        frontier = deque(frontier)
+
+    rows: list[dict[str, Any]] = []
+    visited = 0
+    while frontier and visited < folder_budget:
+        fid, rel_path = frontier.popleft()
+        visited += 1
+        children = _list_children(service, fid)
+        children.sort(
+            key=lambda f: (0 if f.get("mimeType") == FOLDER_MIME else 1, (f.get("name") or "").lower())
+        )
+        for f in children:
+            name = f.get("name") or ""
+            mid = f.get("mimeType") or ""
+            sub = f"{rel_path}/{name}".strip("/") if rel_path else name
+            is_folder = mid == FOLDER_MIME
+            is_shortcut = mid == SHORTCUT_MIME
+
+            if is_folder:
+                frontier.append((f["id"], sub))  # always enqueued — a folder's own
+                continue                          # modifiedTime doesn't reflect its contents
+
+            if modified_before is not None and not _modified_before_cutoff(f.get("modifiedTime"), modified_before):
+                continue
+            rows.append(_row_from_file(f, sub, is_folder=False, is_shortcut=is_shortcut))
+
+        if progress_log:
+            progress_log(f"[round] visited {visited}/{folder_budget} folder(s) this round, "
+                         f"{len(rows)} file(s) found, {len(frontier)} folder(s) queued")
+
+    return rows, frontier
 
 
 def list_shared_drives(service, *, use_domain_admin_access: bool = False) -> list[dict[str, Any]]:

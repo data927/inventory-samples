@@ -16,9 +16,12 @@ from tools.build_quality_sample import (
     GB,
     add_to_thread,
     allocate_binary_by_account,
+    allocate_equally_by_account,
     greedy_fill,
     select_native_by_account,
     select_top_by_recency,
+    _account_has_enough,
+    _group_by_account,
 )
 
 
@@ -144,6 +147,87 @@ def test_allocate_binary_by_account_never_exceeds_cap_single_account() -> None:
     assert total <= 65 * MB
 
 
+def _empty_buckets() -> dict:
+    return {"binary": [], "gsheets": [], "gdocs": [], "gslides": []}
+
+
+def test_account_has_enough_requires_both_native_and_binary_thresholds() -> None:
+    thresholds = dict(gsheets_per_account=30, gdocs_per_account=40, gslides_per_account=20, drive_cap_bytes=10 * GB)
+
+    empty = _empty_buckets()
+    assert not _account_has_enough(empty, **thresholds), "nothing found yet -> not enough"
+
+    native_only = _empty_buckets()
+    native_only["gsheets"] = [{"file_id": f"s{i}"} for i in range(90)]   # 30 * 3 multiplier
+    native_only["gdocs"] = [{"file_id": f"d{i}"} for i in range(120)]    # 40 * 3
+    native_only["gslides"] = [{"file_id": f"p{i}"} for i in range(60)]   # 20 * 3
+    assert not _account_has_enough(native_only, **thresholds), "native thresholds met but binary bytes are still 0"
+
+    binary_only = _empty_buckets()
+    binary_only["binary"] = [{"file_id": "big", "size_bytes": 10 * GB}]
+    assert not _account_has_enough(binary_only, **thresholds), "binary threshold met but native counts are still 0"
+
+    both = _empty_buckets()
+    both["gsheets"] = native_only["gsheets"]
+    both["gdocs"] = native_only["gdocs"]
+    both["gslides"] = native_only["gslides"]
+    both["binary"] = binary_only["binary"]
+    assert _account_has_enough(both, **thresholds), "both thresholds met -> enough"
+
+    one_short = _empty_buckets()
+    one_short["gsheets"] = native_only["gsheets"][:-1]  # 89, just under the 90 threshold
+    one_short["gdocs"] = native_only["gdocs"]
+    one_short["gslides"] = native_only["gslides"]
+    one_short["binary"] = binary_only["binary"]
+    assert not _account_has_enough(one_short, **thresholds), "one native type just short -> still not enough"
+
+
+def test_group_by_account_supports_custom_key() -> None:
+    drive_rows = [{"owner_email": "a@co.com", "x": 1}, {"owner_email": "b@co.com", "x": 2}]
+    assert set(_group_by_account(drive_rows)) == {"a@co.com", "b@co.com"}
+
+    gmail_rows = [{"user_email": "c@co.com", "x": 1}, {"user_email": "c@co.com", "x": 2}]
+    grouped = _group_by_account(gmail_rows, key="user_email")
+    assert set(grouped) == {"c@co.com"}
+    assert len(grouped["c@co.com"]) == 2
+
+
+def _thread(email: str, tid: str, size_bytes: int) -> dict:
+    return {"user_email": email, "thread_id": tid, "subject": "x", "size_bytes": size_bytes,
+            "message_ids": [f"{tid}-m1"]}
+
+
+def test_allocate_equally_by_account_splits_evenly_ignoring_data_volume() -> None:
+    rows = [
+        _thread("a@co.com", "t1", 3 * GB), _thread("a@co.com", "t2", 5 * GB), _thread("a@co.com", "t3", 10 * GB),
+        _thread("b@co.com", "t4", 1 * GB),
+        _thread("c@co.com", "t5", 1 * GB), _thread("c@co.com", "t6", 1 * GB),
+    ]
+    cap = 6 * GB  # 3 accounts -> 2GB nominal equal share each
+    selected, total = allocate_equally_by_account(rows, cap)
+    by_acct: dict[str, int] = {}
+    for r in selected:
+        by_acct[r["user_email"]] = by_acct.get(r["user_email"], 0) + r["size_bytes"]
+
+    assert total == cap, "leftover reclaim should fully use the cap"
+    assert set(by_acct) == {"a@co.com", "b@co.com", "c@co.com"}, "every account represented"
+    # a has 18GB of data (9x more than b) but its equal share is the same nominal 2GB as
+    # everyone else — it only ends up with more because reclaim happened to fit its file.
+    assert by_acct["b@co.com"] == 1 * GB
+    assert by_acct["c@co.com"] == 2 * GB
+
+
+def test_allocate_equally_by_account_empty() -> None:
+    assert allocate_equally_by_account([], cap_bytes=1000) == ([], 0)
+
+
+def test_allocate_equally_by_account_cannot_exceed_cap() -> None:
+    rows = [_thread("small@co.com", "t1", 1 * GB), _thread("chunky@co.com", "t2", 9 * GB)]
+    selected, total = allocate_equally_by_account(rows, cap_bytes=2 * GB)
+    assert total == 1 * GB, "the 9GB thread can never fit a 2GB cap, reclaim or not"
+    assert total <= 2 * GB
+
+
 if __name__ == "__main__":
     test_greedy_fill_backfills_around_oversized_item()
     test_greedy_fill_empty_and_exact_cap()
@@ -155,4 +239,9 @@ if __name__ == "__main__":
     test_allocate_binary_by_account_empty()
     test_allocate_binary_by_account_guarantees_every_account_is_included()
     test_allocate_binary_by_account_never_exceeds_cap_single_account()
+    test_account_has_enough_requires_both_native_and_binary_thresholds()
+    test_group_by_account_supports_custom_key()
+    test_allocate_equally_by_account_splits_evenly_ignoring_data_volume()
+    test_allocate_equally_by_account_empty()
+    test_allocate_equally_by_account_cannot_exceed_cap()
     print("OK")

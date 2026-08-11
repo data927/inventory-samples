@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from googleapiclient.errors import HttpError
+
+from gdrive.fetch import _sleep_backoff
+
 
 def _b64_decode(data: str) -> bytes:
     padded = data + "=" * (-len(data) % 4)
@@ -138,11 +142,25 @@ def fetch_message(service, message_id: str, user_id: str = "me") -> dict[str, An
     }
 
 
-def fetch_message_meta(service, message_id: str, user_id: str = "me") -> dict[str, Any]:
-    """Cheap per-message metadata: size + thread id, no body/attachment parsing."""
-    msg = service.users().messages().get(
-        userId=user_id, id=message_id, format="metadata", metadataHeaders=["Subject"],
-    ).execute()
+def fetch_message_meta(
+    service, message_id: str, user_id: str = "me", *, max_retries: int = 8,
+) -> dict[str, Any]:
+    """Cheap per-message metadata: size + thread id, no body/attachment parsing.
+
+    Retries transient errors (403/429/500/503 — e.g. Gmail's own backend hiccups on a
+    long scan) with exponential backoff; other errors raise immediately.
+    """
+    msg = None
+    for attempt in range(max_retries + 1):
+        try:
+            msg = service.users().messages().get(
+                userId=user_id, id=message_id, format="metadata", metadataHeaders=["Subject"],
+            ).execute()
+            break
+        except HttpError as e:
+            if attempt >= max_retries or e.resp.status not in (403, 429, 500, 503):
+                raise
+            _sleep_backoff(attempt, e)
     headers = (msg.get("payload") or {}).get("headers") or []
     return {
         "message_id": msg.get("id") or "",
@@ -159,6 +177,7 @@ def list_message_ids(
     query: str = "",
     max_messages: int | None = None,
     progress_log: Callable[[str], None] | None = None,
+    max_retries: int = 8,
 ) -> list[str]:
     """Return all message IDs for a mailbox. ``query`` is a Gmail search query."""
     ids: list[str] = []
@@ -173,7 +192,14 @@ def list_message_ids(
             kwargs["q"] = query
         if page_token:
             kwargs["pageToken"] = page_token
-        resp = service.users().messages().list(**kwargs).execute()
+        for attempt in range(max_retries + 1):
+            try:
+                resp = service.users().messages().list(**kwargs).execute()
+                break
+            except HttpError as e:
+                if attempt >= max_retries or e.resp.status not in (403, 429, 500, 503):
+                    raise
+                _sleep_backoff(attempt, e)
         batch = [m["id"] for m in (resp.get("messages") or [])]
         ids.extend(batch)
         if progress_log and len(ids) % 5000 < 500:
