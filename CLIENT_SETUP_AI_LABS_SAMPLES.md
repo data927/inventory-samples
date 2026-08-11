@@ -139,6 +139,8 @@ This is the one-time Google Cloud Console setup that lets this tool sign in as y
    - A dialog shows your client ID/secret — click **Download JSON**
 6. Save that downloaded file somewhere you can find it (e.g. your Downloads folder). You'll point the tool at it in Part 4.
 
+> **If you're the operator and will also do Part 5's Workspace mode:** this same Cloud project can hold the Service Account from Part 5 too — you don't need a second project. The OAuth client here and the Service Account there are separate, independent credentials that happen to live in the same place; either reuse this project or use a different one, both work.
+
 ---
 
 ## Part 4 — Connect the tool to your OAuth credentials
@@ -190,22 +192,34 @@ In My Drive mode there's only one account, so both rules simplify back to the or
 
 Skip this whole box for My Drive mode — nothing extra is needed there beyond Part 3/4.
 
-**One-time admin setup (~10 minutes), done by a Workspace super-admin:**
+**Two different people are usually involved here** — don't assume one person needs to do all of this:
 
-1. **Create a Service Account** — [Google Cloud Console](https://console.cloud.google.com/) → your project → **IAM & Admin** → **Service Accounts** → **Create Service Account** → give it any name (e.g. `inventory-scanner`) → **Create and Continue** → **Done**.
-2. Click the service account → **Keys** tab → **Add Key** → **Create new key** → **JSON**. The file downloads automatically — save it somewhere safe.
-3. **Enable Domain-Wide Delegation** — still on the service account page → **Details** tab → expand **Advanced settings** → copy the **Client ID** (a long number) → turn on **Domain-wide delegation** if there's a checkbox for it.
-4. **Authorize the scopes in Google Workspace Admin** — go to [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste the Client ID and add these three scopes (comma-separated):
+- **The operator** (whoever is running this extraction — often an external vendor, not the client's own staff) does almost everything below: creates the Service Account, gets its Client ID, enables the APIs. A regular Google account with access to *any* Google Cloud project is enough — no special access to the target Workspace is needed for this part.
+- **The target Workspace's own super-admin** (the client's IT admin) is the **only** person who can do step 4 — it happens inside `admin.google.com` for that specific Workspace, which an outside operator has no access to. The operator sends them the Client ID (never the JSON key file — that stays private) and asks them to authorize it.
+
+**Done by the operator (~5 minutes):**
+
+1. **Create a Service Account** — [Google Cloud Console](https://console.cloud.google.com/) → a project you control (this can be the same project from Part 3, or a separate one — either works) → **IAM & Admin** → **Service Accounts** → **Create Service Account** → give it any name (e.g. `inventory-scanner`) → **Create and Continue** → **Done**.
+2. Click the service account → **Keys** tab → **Add Key** → **Create new key** → **JSON**. The file downloads automatically — save it somewhere safe. This file is a credential — treat it like a password.
+3. Still on the service account page → **Details** tab → expand **Advanced settings** → copy the **Client ID** (a long number) → turn on **Domain-wide delegation** if there's a checkbox for it.
+4. **Enable the APIs** — Cloud Console → **APIs & Services** → **Library** → enable **Google Drive API**, **Admin SDK API**, and **Gmail API** (in the same project as the service account).
+5. Send just the **Client ID** to the target Workspace's super-admin, and ask them to do the next step.
+
+**Done by the target Workspace's super-admin** (a different Google account/organization than the operator, if this is a client engagement):
+
+6. **Authorize the scopes** — go to [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste the Client ID the operator sent you and add these three scopes (comma-separated):
    ```
    https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
    ```
    → **Authorise**. Propagation can take a few minutes — if the first run fails with `unauthorized_client` or `access_denied`, wait 5–10 minutes and retry.
-5. **Enable the APIs** — Cloud Console → **APIs & Services** → **Library** → enable **Google Drive API**, **Admin SDK API**, and **Gmail API**.
-6. Run the wizard to save the credentials:
+
+**Back to the operator, once step 6 is confirmed authorized:**
+
+7. Run the wizard to save the credentials:
    ```
    python setup.py
    ```
-   When it asks `Set up Service Account for full workspace scan? (y/n)`, type `y`, paste the path to the service account JSON key, and paste your super-admin email (e.g. `admin@yourdomain.com` — a real Workspace user, not the service account's own email).
+   When it asks `Set up Service Account for full workspace scan? (y/n)`, type `y`, paste the path to the service account JSON key from step 2, and paste the target Workspace's super-admin email (e.g. `admin@yourdomain.com` — a real Workspace user, not the service account's own email).
 
 ### Run it
 
@@ -215,6 +229,15 @@ Workspace-wide:
 python tools/build_quality_sample.py \
   --service-account ~/Downloads/service_account.json \
   --admin-email admin@yourdomain.com
+```
+
+Just a few specific accounts in the Workspace, instead of everyone:
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com bob@yourdomain.com
 ```
 
 Just your own Drive + Gmail:
@@ -241,6 +264,7 @@ This can take a while for a large Workspace — it caches scan progress under `o
 | `--gmail-query` | (none) | Gmail search query to filter candidate messages (e.g. `after:2024/01/01`) |
 | `--skip-drive` | off | Skip Drive scanning entirely |
 | `--skip-gmail` | off | Skip Gmail scanning entirely |
+| `--users` | (whole domain) | Workspace mode only: scan just these accounts instead of everyone — space- or comma-separated emails, e.g. `--users a@co.com b@co.com`. Skips Admin SDK enumeration entirely, so it doesn't even need the Admin SDK API/scope. |
 
 ### Output
 

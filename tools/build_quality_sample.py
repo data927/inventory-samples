@@ -85,6 +85,25 @@ def _log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
+def _parse_users(raw: list[str] | None) -> list[str]:
+    """Flatten space- and/or comma-separated emails, preserve order, drop dupes."""
+    if not raw:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        for part in item.split(","):
+            email = part.strip()
+            if not email:
+                continue
+            key = email.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(email)
+    return out
+
+
 def _int_size(raw: Any) -> int:
     try:
         return int(raw)
@@ -241,13 +260,20 @@ def _bucket_drive_rows(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, A
 
 
 def collect_drive_candidates_workspace(
-    *, sa_file: Path, admin_email: str, scan_cache: str, progress_log=_log,
+    *, sa_file: Path, admin_email: str, scan_cache: str, users: list[str] | None = None, progress_log=_log,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Every user's My Drive + every Shared Drive (Domain-Wide Delegation)."""
-    admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
-    admin_svc = build_admin_service(admin_sdk_creds)
-    users = list_workspace_users(admin_svc)
-    progress_log(f"[drive] {len(users)} workspace user(s) found")
+    """Every user's My Drive + every Shared Drive (Domain-Wide Delegation).
+
+    ``users``, if given, restricts the scan to those emails and skips the Admin SDK
+    enumeration call entirely (so ``--users`` mode doesn't even need Admin SDK access).
+    """
+    if users is None:
+        admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
+        admin_svc = build_admin_service(admin_sdk_creds)
+        users = list_workspace_users(admin_svc)
+        progress_log(f"[drive] {len(users)} workspace user(s) found")
+    else:
+        progress_log(f"[drive] scanning {len(users)} selected user(s): {', '.join(users)}")
 
     admin_drive_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_READONLY)
     admin_drive_svc = build_drive_service(admin_drive_creds)
@@ -393,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="Service account JSON key (Domain-Wide Delegation)")
     p.add_argument("--admin-email", default="", metavar="EMAIL",
                     help="Admin email to impersonate (or GOOGLE_ADMIN_EMAIL env var)")
+    p.add_argument("--users", nargs="+", metavar="EMAIL",
+                    help="Workspace mode only: scan just these users instead of the whole domain "
+                         "(space- or comma-separated; skips Admin SDK enumeration entirely)")
     args = p.parse_args(argv)
 
     sa_file = Path(args.service_account).expanduser().resolve() if args.service_account else None
@@ -406,7 +435,13 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("ERROR: --admin-email (or GOOGLE_ADMIN_EMAIL env var) is required with --service-account", flush=True)
         return 1
+    selected_users = _parse_users(args.users)
+    if selected_users and not workspace_mode:
+        print("ERROR: --users requires --service-account (Domain-Wide Delegation)", flush=True)
+        return 1
     _log(f"[mode] {'workspace (Domain-Wide Delegation)' if workspace_mode else 'my Drive + Gmail only'}")
+    if selected_users:
+        _log(f"[mode] restricted to {len(selected_users)} selected user(s): {', '.join(selected_users)}")
 
     out_path = (_ROOT / args.out).resolve()
     scan_cache_dir = out_path.parent
@@ -422,7 +457,8 @@ def main(argv: list[str] | None = None) -> int:
         drive_scan_cache = str(scan_cache_dir / (out_path.stem + ".drive_scan_cache.jsonl"))
         if workspace_mode:
             buckets = collect_drive_candidates_workspace(
-                sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache, progress_log=_log,
+                sa_file=sa_file, admin_email=admin_email, scan_cache=drive_scan_cache,
+                users=selected_users or None, progress_log=_log,
             )
         else:
             buckets = collect_drive_candidates_single(
@@ -452,9 +488,12 @@ def main(argv: list[str] | None = None) -> int:
     gmail_total = 0
     if not args.skip_gmail:
         if workspace_mode:
-            admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
-            admin_svc = build_admin_service(admin_sdk_creds)
-            gmail_users = list_workspace_users(admin_svc)
+            if selected_users:
+                gmail_users = selected_users
+            else:
+                admin_sdk_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_ADMIN_USERS)
+                admin_svc = build_admin_service(admin_sdk_creds)
+                gmail_users = list_workspace_users(admin_svc)
 
             def _gmail_service_for(email: str):
                 creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
