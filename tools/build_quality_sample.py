@@ -585,6 +585,83 @@ def collect_gmail_candidates(
     return list(by_thread.values())
 
 
+def _stream_gmail_account_in_rounds(
+    service,
+    email: str,
+    *,
+    gmail_cap_bytes: int,
+    messages_per_round: int,
+    gmail_query: str,
+    scan_cache_dir: Path,
+    before_suffix: str,
+    work_queue: "queue.Queue | None",
+    progress_log=_log,
+) -> list[dict[str, Any]]:
+    """Scan one mailbox's messages in batches of ``messages_per_round``, selecting
+    threads round by round against a shared running budget instead of waiting for the
+    whole mailbox to be enumerated first — used by both the workspace and single-account
+    streaming pipelines so each account's own Gmail scan overlaps with its own transfer,
+    not just with other accounts' scans.
+
+    Approximate by necessity, unlike Drive's round-based selection: Gmail message IDs
+    aren't returned thread-grouped, so a thread's accounted size only reflects the
+    messages seen by the round it happens to get selected in — a thread's remaining
+    messages can still show up in a later round. The transfer itself always grabs the
+    *complete* thread (``fetch_thread_raw``), so nothing is ever missed on disk, but the
+    bytes actually moved for that thread can exceed what was charged against the cap,
+    bounded by that one thread's own total size. Confirmed acceptable trade-off for the
+    concurrency it buys — see ``--folders-per-round`` docs.
+
+    Pushes ``(email, round_selected)`` onto ``work_queue`` after each round for a
+    caller-owned background transfer worker to drain. Pass ``work_queue=None`` (e.g.
+    ``--scan-only``) to just select without queuing any transfer.
+    """
+    safe_email = email.replace("@", "_at_")
+    cache_path = scan_cache_dir / f"gmail_ids__{safe_email}{before_suffix}.txt"
+    ids = scan_mailbox(service, email, query=gmail_query, progress_log=progress_log,
+                        scan_cache_path=str(cache_path))
+    meta_cache_path = scan_cache_dir / f"gmail_meta__{safe_email}{before_suffix}.jsonl"
+    meta_cache = _load_message_meta_cache(meta_cache_path)
+
+    by_thread: dict[tuple[str, str], dict[str, Any]] = {}
+    already_selected: set[str] = set()
+    all_selected: list[dict[str, Any]] = []
+    remaining = gmail_cap_bytes
+    batch_size = max(messages_per_round, 1)
+    round_num = 0
+
+    for batch_start in range(0, len(ids), batch_size):
+        round_num += 1
+        if remaining <= 0:
+            progress_log(f"[stream] {email}: gmail cap reached — stopping scan after round {round_num - 1}")
+            break
+
+        batch_ids = ids[batch_start:batch_start + batch_size]
+        for mid in batch_ids:
+            meta = meta_cache.get(mid)
+            if meta is None:
+                meta = fetch_message_meta(service, mid, user_id=email)
+                _append_message_meta_cache(meta_cache_path, meta)
+            add_to_thread(by_thread, email, meta)
+
+        candidates = [t for t in by_thread.values() if t["thread_id"] not in already_selected]
+        round_selected, round_total = greedy_fill(candidates, remaining)
+        for t in round_selected:
+            already_selected.add(t["thread_id"])
+        all_selected.extend(round_selected)
+        remaining -= round_total
+        progress_log(f"[stream] {email}: round {round_num} selected {len(round_selected)} thread(s) "
+                     f"({round_total / GB:.2f}GB), {remaining / GB:.2f}GB left of the cap, "
+                     f"{batch_start + len(batch_ids)}/{len(ids)} message(s) scanned")
+
+        if work_queue is not None and round_selected:
+            work_queue.put((email, round_selected))
+            progress_log(f"[stream] {email}: round {round_num} queued for transfer — "
+                         f"continuing to scan the next round")
+
+    return all_selected
+
+
 def my_drive_service():
     """OAuth Drive service for the signed-in account, reusing the same token this repo's
     other tools already use (prompts a browser login the first time it's missing)."""
@@ -758,6 +835,7 @@ def run_streaming_workspace_pipeline(
     gdocs_per_account: int,
     gslides_per_account: int,
     folders_per_round: int,
+    messages_per_round: int,
     modified_before: str | None,
     gmail_query: str,
     scan_cache_dir: Path,
@@ -780,7 +858,12 @@ def run_streaming_workspace_pipeline(
     skipped entirely for Drive — scanning moves straight on to Gmail rather than
     working through every account regardless of whether the cap is already full.
     Gmail, once it starts, still splits its own cap into a flat equal share per
-    account (unchanged) — this running-budget behavior is Drive-specific.
+    account (unchanged) — this running-budget behavior is Drive-specific. Within each
+    account's own share, Gmail is scanned and selected in batches of
+    ``messages_per_round`` messages via ``_stream_gmail_account_in_rounds`` — so a
+    single huge mailbox's own scan overlaps with its own transfer too, not just with
+    other accounts' scans (see that function's docstring for the accounting caveat this
+    implies: an approximate, not exact, cap).
 
     Trade-off, deliberate: no cross-account priority weighting, no reclaim of one
     account's unused capacity for another, no cross-account top-up for native files —
@@ -970,30 +1053,13 @@ def run_streaming_workspace_pipeline(
             progress_log(f"[stream] Gmail → {email}")
             u_creds = get_service_account_credentials(sa_file, email, SCOPES_GMAIL)
             svc = build_gmail_service(u_creds)
-            safe_email = email.replace("@", "_at_")
-            cache_path = scan_cache_dir / f"gmail_ids__{safe_email}{before_suffix}.txt"
-            ids = scan_mailbox(svc, email, query=gmail_query, progress_log=progress_log,
-                                scan_cache_path=str(cache_path))
-            meta_cache_path = scan_cache_dir / f"gmail_meta__{safe_email}{before_suffix}.jsonl"
-            meta_cache = _load_message_meta_cache(meta_cache_path)
-            by_thread: dict[tuple[str, str], dict[str, Any]] = {}
-            for i, mid in enumerate(ids, start=1):
-                meta = meta_cache.get(mid)
-                if meta is None:
-                    meta = fetch_message_meta(svc, mid, user_id=email)
-                    _append_message_meta_cache(meta_cache_path, meta)
-                add_to_thread(by_thread, email, meta)
-                if progress_log and i % 500 == 0:
-                    progress_log(f"[stream] {email}: {i}/{len(ids)} message(s) scanned")
-
-            account_threads = list(by_thread.values())
-            selected, total = greedy_fill(account_threads, per_account_gmail_cap)
+            selected = _stream_gmail_account_in_rounds(
+                svc, email, gmail_cap_bytes=per_account_gmail_cap, messages_per_round=messages_per_round,
+                gmail_query=gmail_query, scan_cache_dir=scan_cache_dir, before_suffix=before_suffix,
+                work_queue=gmail_work_queue if gmail_worker is not None else None,
+                progress_log=progress_log,
+            )
             all_gmail_selected.extend(selected)
-            progress_log(f"[stream] {email}: selected {len(selected)} thread(s), {total / GB:.2f}GB")
-
-            if gmail_worker is not None and selected:
-                gmail_work_queue.put((email, selected))
-                progress_log(f"[stream] {email}: queued for transfer — continuing to scan the next account")
 
         if gmail_worker is not None:
             gmail_work_queue.put(None)
@@ -1141,6 +1207,86 @@ def run_streaming_single_account_drive(
     return all_selected, native_counts
 
 
+def run_streaming_single_account_gmail(
+    service,
+    email: str,
+    *,
+    gmail_cap_bytes: int,
+    messages_per_round: int,
+    gmail_query: str,
+    scan_cache_dir: Path,
+    before_suffix: str,
+    checkpoint_dir: Path,
+    scan_only: bool,
+    progress_log=_log,
+) -> list[dict[str, Any]]:
+    """Single-account counterpart to the round-based Gmail streaming used inside
+    ``run_streaming_workspace_pipeline`` — same round-by-round scan+select+transfer
+    overlap (via ``_stream_gmail_account_in_rounds``), just for the one mailbox instead
+    of across accounts. See that function's docstring for the accounting caveat this
+    implies (an approximate, not exact, cap — a thread's charged size only reflects
+    messages seen by the round it's selected in).
+    """
+    ckpt = checkpoint_dir / "ai_labs_gmail_threads.checkpoint.jsonl"
+    worker: threading.Thread | None = None
+    work_queue: queue.Queue = queue.Queue()
+
+    if not scan_only:
+        dest_service = build_gmail_service(_get_insert_credentials())
+        done = _load_done(ckpt)
+
+        def _transfer_worker() -> None:
+            # Only this thread ever touches dest_service/done — one writer, no locking needed.
+            while True:
+                item = work_queue.get()
+                if item is None:
+                    work_queue.task_done()
+                    return
+                acct_email, batch = item
+                ok = skip = fail = 0
+                for row in batch:
+                    thread_key = f"{acct_email}:{row['thread_id']}"
+                    if thread_key in done:
+                        skip += 1
+                        continue
+                    try:
+                        raw_messages = fetch_thread_raw(service, row["thread_id"], user_id=acct_email)
+                        inserted_ids = [_insert_message(dest_service, raw) for raw in raw_messages]
+                        _append_done(ckpt, {
+                            "file_id": thread_key, "thread_id": row["thread_id"], "user_email": acct_email,
+                            "inserted_ids": inserted_ids, "status": "ok",
+                        })
+                        done.add(thread_key)
+                        ok += 1
+                    except (HttpError, RuntimeError, OSError) as exc:
+                        fail += 1
+                        _append_done(ckpt, {
+                            "file_id": thread_key, "thread_id": row["thread_id"], "user_email": acct_email,
+                            "status": "error", "error": str(exc)[:500],
+                        })
+                        progress_log(f"[stream] FAIL gmail {row.get('subject', '')[:60]!r} — {exc}")
+                progress_log(f"[stream] gmail: transferred ok={ok} skip={skip} fail={fail}")
+                work_queue.task_done()
+
+        worker = threading.Thread(target=_transfer_worker, daemon=True)
+        worker.start()
+
+    selected = _stream_gmail_account_in_rounds(
+        service, email, gmail_cap_bytes=gmail_cap_bytes, messages_per_round=messages_per_round,
+        gmail_query=gmail_query, scan_cache_dir=scan_cache_dir, before_suffix=before_suffix,
+        work_queue=work_queue if worker is not None else None,
+        progress_log=progress_log,
+    )
+
+    if worker is not None:
+        work_queue.put(None)
+        progress_log("[stream] Gmail scanning done — waiting for the transfer queue to drain...")
+        worker.join()
+        progress_log("[stream] Gmail fully done")
+
+    return selected
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--drive-cap-gb", type=float, default=15.0,
@@ -1179,7 +1325,18 @@ def main(argv: list[str] | None = None) -> int:
                          "it has enough candidates for the configured targets (0 = disabled, scan "
                          "every folder exhaustively — default). Speeds up huge workspaces at the "
                          "cost of a small chance of missing a marginally-better file in an "
-                         "unscanned folder. Shared Drives are always scanned exhaustively.")
+                         "unscanned folder. Shared Drives are always scanned exhaustively. Also "
+                         "enables Gmail round-based streaming (see --messages-per-round) — set > 0 "
+                         "to speed up either source.")
+    p.add_argument("--messages-per-round", type=int, default=2000, metavar="N",
+                    help="Gmail equivalent of --folders-per-round: scan each mailbox in batches of "
+                         "N messages, selecting and transferring each batch while scanning continues "
+                         "into the next (default: 2000). Only takes effect when --folders-per-round "
+                         "> 0. Approximate cap: a thread's charged size only reflects the messages "
+                         "seen by the round it's selected in, since Gmail message IDs aren't returned "
+                         "thread-grouped — the transfer itself always grabs the complete thread, so "
+                         "actual bytes moved can modestly exceed the accounted total, bounded by that "
+                         "thread's own size.")
     p.add_argument("--skip-drive", action="store_true", help="Skip Drive scanning/selection")
     p.add_argument("--skip-gmail", action="store_true", help="Skip Gmail scanning/selection")
     sa_default = str(default_service_account_path()) if default_service_account_path() else ""
@@ -1258,6 +1415,7 @@ def main(argv: list[str] | None = None) -> int:
             drive_cap_bytes=drive_cap_bytes, gmail_cap_bytes=gmail_cap_bytes,
             gsheets_per_account=args.gsheets_per_account, gdocs_per_account=args.gdocs_per_account,
             gslides_per_account=args.gslides_per_account, folders_per_round=args.folders_per_round,
+            messages_per_round=args.messages_per_round,
             modified_before=drive_before, gmail_query=gmail_query, scan_cache_dir=scan_cache_dir,
             before_suffix=before_suffix, folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,
             scan_only=args.scan_only, skip_drive=args.skip_drive, skip_gmail=args.skip_gmail,
@@ -1341,7 +1499,19 @@ def main(argv: list[str] | None = None) -> int:
 
         gmail_selected: list[dict[str, Any]] = []
         gmail_total = 0
-        if not args.skip_gmail:
+        if not args.skip_gmail and not workspace_mode and args.folders_per_round > 0:
+            single_gmail_svc, my_email = my_gmail_service()
+            gmail_selected = run_streaming_single_account_gmail(
+                single_gmail_svc, my_email, gmail_cap_bytes=gmail_cap_bytes,
+                messages_per_round=args.messages_per_round, gmail_query=gmail_query,
+                scan_cache_dir=scan_cache_dir, before_suffix=f"__before_{args.before}" if args.before else "",
+                checkpoint_dir=scan_cache_dir, scan_only=args.scan_only, progress_log=_log,
+            )
+            gmail_total = sum(r["size_bytes"] for r in gmail_selected)
+            _log(f"[gmail] streamed: selected {len(gmail_selected)} thread(s), {gmail_total / GB:.2f}GB "
+                 f"/ {args.gmail_cap_gb:.2f}GB cap "
+                 f"[streaming mode — already transferred incrementally per round above]")
+        elif not args.skip_gmail:
             if workspace_mode:
                 if selected_users:
                     gmail_users = selected_users
