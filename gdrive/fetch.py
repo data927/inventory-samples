@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import io
 import random
+import ssl
 import time
 from pathlib import Path
 from typing import Any
 
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
+
+# Mid-stream network failures (dead socket, VPN/AV interference) — retryable like
+# transient HttpErrors, but httplib2 doesn't recover the underlying connection on
+# its own, so callers must also drop pooled sockets before retrying (see
+# _reset_http_connections).
+_RETRYABLE_NETWORK_ERRORS = (ssl.SSLError, ConnectionResetError, BrokenPipeError)
 
 # Native Google files: export MIME (not get_media).
 _GOOGLE_EXPORT_MIME: dict[str, str] = {
@@ -79,6 +86,24 @@ def _sleep_backoff(attempt: int, err: HttpError) -> None:
     base = 0.75 * (2**attempt)
     jitter = random.uniform(0.0, base * 0.25)
     time.sleep(min(120.0, base + jitter))
+
+
+def _sleep_backoff_network(attempt: int) -> None:
+    base = 0.75 * (2**attempt)
+    jitter = random.uniform(0.0, base * 0.25)
+    time.sleep(min(120.0, base + jitter))
+
+
+def _reset_http_connections(service: Any) -> None:
+    """Drop pooled httplib2 sockets after a mid-stream SSL/connection failure.
+
+    Without this, the next request on ``service`` reuses the same dead connection
+    and fails again immediately.
+    """
+    http = getattr(getattr(service, "_http", None), "http", None)
+    connections = getattr(http, "connections", None)
+    if connections is not None:
+        connections.clear()
 
 
 def _suffix_for_export(export_mime: str, display_name: str) -> str:
@@ -173,7 +198,7 @@ def fetch_drive_file_to_path(
 
     export_mime = _GOOGLE_EXPORT_MIME.get(mime_type)
 
-    last_err: HttpError | None = None
+    last_err: HttpError | Exception | None = None
     for attempt in range(max_retries + 1):
         fh = io.BytesIO()
         if export_mime is not None:
@@ -199,6 +224,12 @@ def fetch_drive_file_to_path(
             if attempt >= max_retries:
                 return f"HttpError {e.resp.status}: {e}"
             _sleep_backoff(attempt, e)
+        except _RETRYABLE_NETWORK_ERRORS as e:
+            last_err = e
+            if attempt >= max_retries:
+                return f"{type(e).__name__}: {e}"
+            _reset_http_connections(service)
+            _sleep_backoff_network(attempt)
         except OSError as e:
             return f"OSError: {e}"
     return str(last_err) if last_err else "unknown_error"

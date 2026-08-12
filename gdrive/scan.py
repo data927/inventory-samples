@@ -11,7 +11,7 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
-from gdrive.fetch import _sleep_backoff
+from gdrive.fetch import _RETRYABLE_NETWORK_ERRORS, _reset_http_connections, _sleep_backoff, _sleep_backoff_network
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -72,6 +72,11 @@ def _list_children(service, folder_id: str, *, max_retries: int = 8) -> list[dic
                 if attempt >= max_retries or e.resp.status not in (403, 429, 500, 503):
                     raise
                 _sleep_backoff(attempt, e)
+            except _RETRYABLE_NETWORK_ERRORS:
+                if attempt >= max_retries:
+                    raise
+                _reset_http_connections(service)
+                _sleep_backoff_network(attempt)
         out.extend(resp.get("files") or [])
         page_token = resp.get("nextPageToken")
         if not page_token:
