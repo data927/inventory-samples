@@ -144,14 +144,14 @@ python tools/build_quality_sample_local.py --root C:\Users\YourName\Downloads\co
 
 That copies **everything** under `Folder A` onto the Desktop (no 1000-file / 15GB trim).
 
-### As-is until 10GB
+### As-is until 40GB
 
 ```
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is
 ```
 
 ```
-python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 40
 ```
 
 ### All subfolders (capped sample)
@@ -192,10 +192,10 @@ out/quality_sample_local_manifest.json
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
 ```
 
-**As-is until 10GB:**
+**As-is until 40GB:**
 
 ```
-python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 40
 ```
 
 **Different per-folder first pass (default 1000 when multiple folders, then fill to 15GB):**
@@ -265,8 +265,8 @@ source .venv/bin/activate
 # Entire data of one account
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
 
-# As-is until 10GB
-python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+# As-is until 40GB
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 40
 
 # Or multi-folder capped sample
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump

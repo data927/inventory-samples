@@ -9,7 +9,7 @@ Flags / modes:
     ``--cap-gb`` (default 15).
   * **Entire account** — ``--entire`` (optionally with ``--only NAME``): copy that
     folder's full data, no limit/cap unless you also pass ``--limit`` / ``--cap-gb``.
-  * **As-is until N GB** — ``--as-is`` (default ``--cap-gb 10``): walk order, stop
+  * **As-is until N GB** — ``--as-is`` (default ``--cap-gb 40``): walk order, stop
     when the byte cap is filled (no per-folder first-pass).
 
 Copies to::
@@ -23,9 +23,9 @@ Usage::
   # Entire data of one account
   python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Alice" --entire
 
-  # As-is until 10GB
+  # As-is until 40GB
   python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is
-  python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+  python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 40
 
   # Multi-folder sample (1000 each, then fill to 15GB)
   python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
@@ -228,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="Copy selected account(s) entirely (no file/GB trim unless --limit/"
                          "--cap-gb also set). Use with --only NAME for one account.")
     p.add_argument("--as-is", action="store_true",
-                    help="Walk-order copy until --cap-gb (default 10GB). No per-folder first-pass.")
+                    help="Walk-order copy until --cap-gb (default 40GB). No per-folder first-pass.")
     p.add_argument("--folder-name", default="AI Labs Sample Set",
                     help="Destination folder name on the Desktop")
     p.add_argument("--dest", default="",
@@ -302,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
             by_folder, limit_per_folder=limit, cap_bytes=cap_bytes,
         )
     elif args.as_is:
-        cap_gb = args.cap_gb if args.cap_gb is not None else 10.0
+        cap_gb = args.cap_gb if args.cap_gb is not None else 40.0
         cap_bytes = int(cap_gb * GB)
         _log(f"--as-is → walk order until {cap_gb:g}GB → {dest_root}")
         scan_mode = "local_as_is"
@@ -324,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cap_gb_shown = (
             args.cap_gb if args.cap_gb is not None
-            else (10.0 if args.as_is else (None if entire_mode else 15.0))
+            else (40.0 if args.as_is else (None if entire_mode else 15.0))
         )
         if cap_gb_shown is None:
             _log(f"selected {len(selected)} file(s), {total_bytes / GB:.2f}GB")
@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
     if entire_mode and args.cap_gb is None:
         _log(f"done: ok={total_ok} fail={total_fail} bytes={total_bytes / GB:.2f}GB (entire) → {dest_root}")
     elif args.as_is:
-        cap_gb_done = args.cap_gb if args.cap_gb is not None else 10.0
+        cap_gb_done = args.cap_gb if args.cap_gb is not None else 40.0
         _log(f"done: ok={total_ok} fail={total_fail} bytes={total_bytes / GB:.2f}GB / {cap_gb_done:g}GB → {dest_root}")
     else:
         cap_gb_done = args.cap_gb if args.cap_gb is not None else 15.0

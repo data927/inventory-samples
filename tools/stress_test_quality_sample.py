@@ -9,13 +9,13 @@ Flag matrix (use the matching flags — do not mix modes):
   Local entire account   python tools/build_quality_sample_local.py --root DIR \\
                            --only NAME --entire
 
-  Local as-is 10GB       python tools/build_quality_sample_local.py --root DIR \\
-                           --as-is [--cap-gb 10]
+  Local as-is 40GB       python tools/build_quality_sample_local.py --root DIR \\
+                           --as-is [--cap-gb 40]
 
   Drive entire account   python tools/build_quality_sample.py --full-account
                          (workspace: + --service-account … --admin-email … --users EMAIL)
 
-  Drive as-is 10GB       python tools/build_quality_sample.py --as-is [--cap-gb 10]
+  Drive as-is 40GB       python tools/build_quality_sample.py --as-is [--cap-gb 40]
                          (workspace: + --service-account … --admin-email … --users EMAIL)
 
 Run::
@@ -110,7 +110,7 @@ def stress_local_entire() -> None:
 
 
 def stress_local_as_is_10gb_scale() -> None:
-    """--as-is --cap-gb: walk order until cap (synthetic 10MB stand-in for 10GB logic)."""
+    """--as-is --cap-gb: walk order until cap (synthetic 10MB stand-in for 40GB logic)."""
     print("[stress] local as-is (--as-is --cap-gb)…", flush=True)
     t0 = time.perf_counter()
     with tempfile.TemporaryDirectory() as td:
@@ -138,21 +138,21 @@ def stress_local_as_is_10gb_scale() -> None:
 
 
 def stress_drive_as_is_10gb_selection() -> None:
-    """Drive --as-is --cap-gb 10 selection logic at ~10GB scale (metadata only)."""
-    print("[stress] drive as-is selection (--as-is --cap-gb 10)…", flush=True)
+    """Drive --as-is --cap-gb 40 selection logic at ~40GB scale (metadata only)."""
+    print("[stress] drive as-is selection (--as-is --cap-gb 40)…", flush=True)
     t0 = time.perf_counter()
-    # 50k files × ~256KB ≈ 12.8GB pool; plus some that don't fit
-    batch = [{"file_id": f"f{i}", "size_bytes": 256 * 1024} for i in range(50_000)]
-    batch.insert(100, {"file_id": "huge", "size_bytes": 11 * GB})  # never fits under 10GB alone mid-way
+    # 200k files × 256KB ≈ 51.2GB pool; plus some that don't fit
+    batch = [{"file_id": f"f{i}", "size_bytes": 256 * 1024} for i in range(200_000)]
+    batch.insert(100, {"file_id": "huge", "size_bytes": 45 * GB})  # never fits under 40GB alone mid-way
     accounted: set[str] = set()
     taken, used, full = _take_files_as_is_until_cap(
-        batch, cap_bytes=10 * GB, used_bytes=0, accounted=accounted, already_done=set(),
+        batch, cap_bytes=40 * GB, used_bytes=0, accounted=accounted, already_done=set(),
     )
     _assert(full is True, "cap should be full")
-    _assert(used <= 10 * GB, f"used {used} > 10GB")
-    _assert(used >= 10 * GB - 256 * 1024, f"under-filled: {used}")
-    _assert("huge" not in {r["file_id"] for r in taken}, "11GB file must be skipped")
-    _assert(len(taken) >= 40_000, f"expected many files, got {len(taken)}")
+    _assert(used <= 40 * GB, f"used {used} > 40GB")
+    _assert(used >= 40 * GB - 256 * 1024, f"under-filled: {used}")
+    _assert("huge" not in {r["file_id"] for r in taken}, "oversized file must be skipped")
+    _assert(len(taken) >= 160_000, f"expected many files, got {len(taken)}")
     print(f"  ok files={len(taken)} used={used / GB:.3f}GB in {time.perf_counter() - t0:.1f}s", flush=True)
 
 
@@ -213,11 +213,11 @@ def stress_select_helpers_scale() -> None:
 
 
 def stress_drive_natives_free_on_cap() -> None:
-    """Google Docs/Sheets/Slides (size 0) copy without consuming the 10GB budget."""
-    print("[stress] drive natives free on 10GB cap…", flush=True)
+    """Google Docs/Sheets/Slides (size 0) copy without consuming the 40GB budget."""
+    print("[stress] drive natives free on 40GB cap…", flush=True)
     from tools.build_quality_sample import _drive_rows_all_files
 
-    pdf_size = (10 * GB) // 100  # 100 PDFs ≈ 10GB (floor)
+    pdf_size = (40 * GB) // 100  # 100 PDFs ≈ 40GB (floor)
     rows = []
     for i in range(1000):
         rows.append({
@@ -232,7 +232,7 @@ def stress_drive_natives_free_on_cap() -> None:
             "mime_type": "application/pdf", "is_folder": False, "is_shortcut": False, "modified_time": "",
         })
     # one more tiny file that pushes over / fills remaining after floor division
-    rem = 10 * GB - 100 * pdf_size
+    rem = 40 * GB - 100 * pdf_size
     if rem > 0:
         rows.append({
             "drive_file_id": "tail", "name": "tail.bin", "path": "tail.bin",
@@ -243,18 +243,18 @@ def stress_drive_natives_free_on_cap() -> None:
     files = _drive_rows_all_files(rows)
     accounted: set[str] = set()
     taken, used, full = _take_files_as_is_until_cap(
-        files, cap_bytes=10 * GB, used_bytes=0, accounted=accounted, already_done=set(),
+        files, cap_bytes=40 * GB, used_bytes=0, accounted=accounted, already_done=set(),
     )
     _assert(full is True, f"should fill exactly; used={used} full={full}")
-    _assert(used == 10 * GB, f"used={used}")
+    _assert(used == 40 * GB, f"used={used}")
     _assert(sum(1 for r in taken if r["file_id"].startswith("doc")) == 1000, "all natives included")
     _assert(sum(1 for r in taken if r["file_id"].startswith("pdf")) == 100, "all pdfs included")
     print(f"  ok natives=1000 pdfs=100 used={used / GB:.1f}GB", flush=True)
 
 
 def stress_drive_as_is_multi_round_10gb() -> None:
-    """Simulate many walk rounds filling exactly 10GB."""
-    print("[stress] drive as-is multi-round 10GB…", flush=True)
+    """Simulate many walk rounds filling exactly 40GB."""
+    print("[stress] drive as-is multi-round 40GB…", flush=True)
     t0 = time.perf_counter()
     used = 0
     accounted: set[str] = set()
@@ -268,14 +268,14 @@ def stress_drive_as_is_multi_round_10gb() -> None:
         # sprinkle an oversized file each round
         batch.append({"file_id": f"huge_{round_num}", "size_bytes": 20 * GB})
         taken, used, full = _take_files_as_is_until_cap(
-            batch, cap_bytes=10 * GB, used_bytes=used, accounted=accounted, already_done=set(),
+            batch, cap_bytes=40 * GB, used_bytes=used, accounted=accounted, already_done=set(),
         )
         total_taken += len(taken)
         if full:
             break
-    _assert(full is True, "should eventually fill 10GB")
-    _assert(used <= 10 * GB, f"over cap {used}")
-    _assert(used >= 10 * GB - 5 * 1024 * 1024, f"under-filled {used}")
+    _assert(full is True, "should eventually fill 40GB")
+    _assert(used <= 40 * GB, f"over cap {used}")
+    _assert(used >= 40 * GB - 5 * 1024 * 1024, f"under-filled {used}")
     _assert(total_taken >= 2000, f"expected many 5MB files, got {total_taken}")
     print(f"  ok rounds_stop used={used / GB:.3f}GB files={total_taken} in {time.perf_counter() - t0:.1f}s",
           flush=True)
@@ -465,22 +465,30 @@ def stress_share_folder_idempotent() -> None:
             self.reason = "Error"
 
     class FakePerms:
-        def __init__(self, status=None):
+        def __init__(self, status=None, existing=None):
             self.status = status
+            self.existing = existing or []
             self.calls = 0
 
+        def list(self, **kwargs):
+            self._list_mode = True
+            return self
+
         def create(self, **kwargs):
+            self._list_mode = False
             self.calls += 1
             return self
 
         def execute(self):
+            if getattr(self, "_list_mode", False):
+                return {"permissions": list(self.existing)}
             if self.status:
                 raise HttpError(Resp(self.status), b'{"error":{"message":"already"}}')
-            return {"id": "perm1"}
+            return {"id": "perm1", "role": "writer", "emailAddress": "a@x"}
 
     class FakeSvc:
-        def __init__(self, status=None):
-            self._perms = FakePerms(status)
+        def __init__(self, status=None, existing=None):
+            self._perms = FakePerms(status, existing)
 
         def permissions(self):
             return self._perms
@@ -490,23 +498,31 @@ def stress_share_folder_idempotent() -> None:
     _assert(any("shared" in m for m in logs), logs)
 
     logs.clear()
+    _share_folder_writer(
+        FakeSvc(existing=[{"emailAddress": "a@x", "role": "writer"}]),
+        "fid", "a@x", progress_log=logs.append,
+    )
+    _assert(any("already has access" in m for m in logs), logs)
+
+    logs.clear()
     _share_folder_writer(FakeSvc(409), "fid", "a@x", progress_log=logs.append)
-    _assert(any("skipped" in m or "allowed" in m for m in logs), logs)
+    _assert(any("allowed" in m for m in logs), logs)
     print("  ok", flush=True)
 
 
 def stress_drive_as_is_100k_files() -> None:
-    """Heavier metadata fill: 100k candidates → 10GB."""
-    print("[stress] drive as-is 100k files → 10GB…", flush=True)
+    """Heavier metadata fill: ~350k candidates → 40GB."""
+    print("[stress] drive as-is 350k files → 40GB…", flush=True)
     t0 = time.perf_counter()
-    batch = [{"file_id": f"f{i}", "size_bytes": 128 * 1024} for i in range(100_000)]
+    # 350k × 128KB ≈ 44.8GB pool
+    batch = [{"file_id": f"f{i}", "size_bytes": 128 * 1024} for i in range(350_000)]
     accounted: set[str] = set()
     taken, used, full = _take_files_as_is_until_cap(
-        batch, cap_bytes=10 * GB, used_bytes=0, accounted=accounted, already_done=set(),
+        batch, cap_bytes=40 * GB, used_bytes=0, accounted=accounted, already_done=set(),
     )
     _assert(full is True, "cap full")
-    _assert(used == 10 * GB, f"used={used}")
-    _assert(len(taken) == (10 * GB) // (128 * 1024), f"count={len(taken)}")
+    _assert(used == 40 * GB, f"used={used}")
+    _assert(len(taken) == (40 * GB) // (128 * 1024), f"count={len(taken)}")
     print(f"  ok files={len(taken)} in {time.perf_counter() - t0:.1f}s", flush=True)
 
 

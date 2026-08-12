@@ -98,7 +98,7 @@ Point at any parent folder. **Every immediate subfolder** is processed — names
   ...
 ```
 
-Skips Parts 3–8. **`--entire`**: one account's full data. **`--as-is`**: walk order until **10GB**. **Default multi-folder**: first **1000 files** each, then fill to **15GB**. Copies onto the **Desktop**.
+Skips Parts 3–8. **`--entire`**: one account's full data. **`--as-is`**: walk order until **40GB**. **Default multi-folder**: first **1000 files** each, then fill to **15GB**. Copies onto the **Desktop**.
 
 Full local-only guide: `CLIENT_SETUP_AI_LABS_SAMPLES_LOCAL.docx`
 
@@ -108,10 +108,10 @@ Full local-only guide: `CLIENT_SETUP_AI_LABS_SAMPLES_LOCAL.docx`
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
 ```
 
-**Run — as-is until 10GB**
+**Run — as-is until 40GB**
 
 ```
-python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 40
 ```
 
 **Run — all subfolders (capped sample)**
@@ -232,9 +232,9 @@ Creates `AI Labs Sample Set (date)` in your My Drive and starts copying **immedi
 python tools/build_quality_sample.py --full-account
 ```
 
-**As-is until 10GB (no quality scan):**
+**As-is until 40GB (no quality scan):**
 
-Same immediate transfer, walk order as-is, stops when **10GB** of file data is queued. No Gmail.
+Same immediate transfer, walk order as-is, stops when **40GB** of file data is queued. Folder is shared with the selected user (writer). No Gmail.
 
 ```
 python tools/build_quality_sample.py --as-is
@@ -243,7 +243,7 @@ python tools/build_quality_sample.py --as-is
 Different size:
 
 ```
-python tools/build_quality_sample.py --as-is --cap-gb 10
+python tools/build_quality_sample.py --as-is --cap-gb 40
 ```
 
 ### 5B — Whole Workspace (Service Account + Domain-Wide Delegation)
@@ -296,16 +296,16 @@ python tools/build_quality_sample.py \
   --full-account
 ```
 
-**Run — one account, as-is until 10GB (no quality scan)**
+**Run — one account, as-is until 40GB (no quality scan)**
 
-Same DWD path; walk order as-is; stops at **10GB**. Folder lands in the **admin** My Drive.
+Same DWD path; walk order as-is; stops at **40GB**. Folder lands in the **admin** My Drive and is **shared with the selected user** so they can open it too.
 
 ```
 python tools/build_quality_sample.py \
   --service-account ~/Downloads/service_account.json \
   --admin-email admin@yourdomain.com \
   --users alice@yourdomain.com \
-  --as-is --cap-gb 10
+  --as-is --cap-gb 40
 ```
 
 **Run — specific users only (capped quality sample)**
@@ -362,7 +362,7 @@ If Part 5 transferred everything → skip to **Part 7**.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--full-account` | off | Entire My Drive of one account → AI Labs Sample Set (no quality scan/caps/Gmail) |
-| `--as-is` | off | Walk-order Drive copy until `--cap-gb` (default 10GB); no quality scan/Gmail |
+| `--as-is` | off | Walk-order Drive copy until `--cap-gb` (default 40GB); no quality scan/Gmail |
 | `--cap-gb` | `10` with `--as-is` | Byte cap (GB) for `--as-is` / optional trim for `--full-account` |
 | `--drive-cap-gb` | `15` | Drive binary cap (GB) |
 | `--gmail-cap-gb` | `12.5` | Gmail cap (GB) |
@@ -540,13 +540,13 @@ python tools/build_quality_sample.py \
   --users alice@yourdomain.com \
   --full-account
 
-# As-is until 10GB (walk order, transfer starts immediately)
+# As-is until 40GB (walk order, transfer starts immediately)
 python tools/build_quality_sample.py --as-is
 python tools/build_quality_sample.py \
   --service-account ~/Downloads/service_account.json \
   --admin-email admin@yourdomain.com \
   --users alice@yourdomain.com \
-  --as-is --cap-gb 10
+  --as-is --cap-gb 40
 
 # My Drive only (capped quality sample)
 python tools/build_quality_sample.py

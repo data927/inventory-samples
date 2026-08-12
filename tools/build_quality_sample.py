@@ -41,12 +41,12 @@ Usage:
       --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
       --users alice@yourdomain.com --full-account
 
-  # As-is until 10GB (walk order, no quality scan) — transfer starts immediately
+  # As-is until 40GB (walk order, no quality scan) — transfer starts immediately
   python tools/build_quality_sample.py --as-is
-  python tools/build_quality_sample.py --as-is --cap-gb 10
+  python tools/build_quality_sample.py --as-is --cap-gb 40
   python tools/build_quality_sample.py \\
       --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
-      --users alice@yourdomain.com --as-is --cap-gb 10
+      --users alice@yourdomain.com --as-is --cap-gb 40
 
   python tools/build_quality_sample.py --drive-cap-gb 75 --gmail-cap-gb 12.5 \\
       --gsheets-limit 350 --gdocs-limit 300 --gslides-limit 150 \\
@@ -1146,22 +1146,52 @@ def _take_files_as_is_until_cap(
 
 
 def _share_folder_writer(service, folder_id: str, email: str, progress_log=_log) -> None:
-    """Grant ``email`` writer on ``folder_id`` (idempotent if already shared)."""
+    """Grant ``email`` writer on ``folder_id`` so they can open + write the sample set.
+
+    Idempotent: if they already have writer/organizer/owner, does nothing.
+    """
+    want = email.strip().lower()
+    try:
+        page_token = None
+        while True:
+            resp = (
+                service.permissions()
+                .list(
+                    fileId=folder_id,
+                    fields="nextPageToken,permissions(id,emailAddress,role,type)",
+                    supportsAllDrives=True,
+                    pageToken=page_token,
+                    pageSize=100,
+                )
+                .execute()
+            )
+            for perm in resp.get("permissions") or []:
+                if (perm.get("emailAddress") or "").strip().lower() != want:
+                    continue
+                if perm.get("role") in {"writer", "fileOrganizer", "organizer", "owner"}:
+                    progress_log(f"[as-is] {email} already has access on dest ({perm.get('role')})")
+                    return
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    except HttpError as exc:
+        progress_log(f"[as-is] WARNING: could not list permissions before share ({exc})")
+
     try:
         service.permissions().create(
             fileId=folder_id,
             body={"type": "user", "role": "writer", "emailAddress": email},
             sendNotificationEmail=False,
             supportsAllDrives=True,
-            fields="id",
+            fields="id,role,emailAddress",
         ).execute()
-        progress_log(f"[as-is] shared dest folder with {email} (writer)")
+        progress_log(f"[as-is] shared dest folder with {email} (writer) — they can open it in Drive")
     except HttpError as exc:
-        # 403/409 often means the permission already exists — fine to continue.
         status = getattr(exc, "resp", None)
         code = getattr(status, "status", None) if status is not None else None
-        if code in (400, 403, 409):
-            progress_log(f"[as-is] share {email}: already allowed or skipped ({code})")
+        if code in (400, 409):
+            # 409 = already exists; 400 sometimes for duplicate domain shares
+            progress_log(f"[as-is] share {email}: already allowed ({code})")
             return
         raise
 
@@ -1214,6 +1244,10 @@ def run_full_account_drive_transfer(
 
     if share_dest_with:
         _share_folder_writer(owner_svc, dest_id, share_dest_with, progress_log=progress_log)
+        progress_log(
+            f"[as-is] selected user access: {share_dest_with} → "
+            f"https://drive.google.com/drive/folders/{dest_id}"
+        )
 
     done = _load_done(ckpt)
     folder_cache: dict[str, str] = {}
@@ -1223,9 +1257,11 @@ def run_full_account_drive_transfer(
     budget = max(1, folders_per_round)
     used_bytes = 0
     accounted: set[str] = set()
+    child_shared = False
 
     def _transfer_worker() -> None:
         # Only this thread touches writer_svc / done / folder_cache / all_transferred.
+        nonlocal child_shared
         while True:
             item = work_queue.get()
             if item is None:
@@ -1241,6 +1277,19 @@ def run_full_account_drive_transfer(
                     continue
                 try:
                     parent = _ensure_child_folder(writer_svc, dest_id, email, folder_cache)
+                    # Root is shared with the selected user; child is usually created by
+                    # them so they already own it. Best-effort share via admin if needed.
+                    if share_dest_with and not child_shared:
+                        try:
+                            _share_folder_writer(
+                                owner_svc, parent, share_dest_with, progress_log=progress_log,
+                            )
+                        except HttpError as share_exc:
+                            progress_log(
+                                f"[as-is] child-folder share skipped ({share_exc}) — "
+                                f"user already has access via shared root / ownership"
+                            )
+                        child_shared = True
                     new_id = _drive_copy(writer_svc, fid, parent, row["name"])
                     _append_done(ckpt, {
                         "file_id": fid, "new_id": new_id, "bucket": email,
@@ -1598,10 +1647,10 @@ def main(argv: list[str] | None = None) -> int:
                          "--users EMAIL.")
     p.add_argument("--as-is", action="store_true",
                     help="Transfer Drive files as-is (walk order) into AI Labs Sample Set — "
-                         "no quality scan, Drive only. Stops at --cap-gb (default 10GB). "
+                         "no quality scan, Drive only. Stops at --cap-gb (default 40GB). "
                          "Same account rules as --full-account.")
     p.add_argument("--cap-gb", type=float, default=None, metavar="GB",
-                    help="Byte cap for --as-is / --full-account (GB). Default: 10 with --as-is; "
+                    help="Byte cap for --as-is / --full-account (GB). Default: 40 with --as-is; "
                          "unlimited with --full-account alone.")
     args = p.parse_args(argv)
 
@@ -1687,8 +1736,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.full_account:
             cap_bytes = int(args.cap_gb * GB) if args.cap_gb is not None else None
         else:
-            # --as-is: default 10GB
-            cap_bytes = int((args.cap_gb if args.cap_gb is not None else 10.0) * GB)
+            # --as-is: default 40GB
+            cap_bytes = int((args.cap_gb if args.cap_gb is not None else 40.0) * GB)
 
         if cap_bytes is None:
             _log(f"[mode] {mode_label} Drive transfer for {email} (entire account, no Gmail)")
