@@ -21,7 +21,9 @@ from tools.build_quality_sample import (
     select_native_by_account,
     select_top_by_recency,
     _account_has_enough,
+    _drive_rows_all_files,
     _group_by_account,
+    _take_files_as_is_until_cap,
 )
 
 
@@ -228,6 +230,56 @@ def test_allocate_equally_by_account_cannot_exceed_cap() -> None:
     assert total <= 2 * GB
 
 
+def test_drive_rows_all_files_keeps_zero_size_natives() -> None:
+    rows = [
+        {"drive_file_id": "1", "name": "doc", "path": "a/doc", "owner_email": "a@x",
+         "size_bytes": 0, "mime_type": "application/vnd.google-apps.document",
+         "is_folder": False, "is_shortcut": False, "modified_time": ""},
+        {"drive_file_id": "2", "name": "pdf", "path": "a/pdf", "owner_email": "a@x",
+         "size_bytes": 100, "mime_type": "application/pdf",
+         "is_folder": False, "is_shortcut": False, "modified_time": ""},
+        {"drive_file_id": "3", "name": "folder", "path": "a", "owner_email": "a@x",
+         "size_bytes": 0, "mime_type": "application/vnd.google-apps.folder",
+         "is_folder": True, "is_shortcut": False, "modified_time": ""},
+        {"drive_file_id": "4", "name": "link", "path": "a/link", "owner_email": "",
+         "size_bytes": 0, "mime_type": "application/vnd.google-apps.shortcut",
+         "is_folder": False, "is_shortcut": True, "modified_time": ""},
+    ]
+    got = _drive_rows_all_files(rows, default_owner="fallback@x")
+    assert {r["file_id"] for r in got} == {"1", "2"}
+    assert next(r for r in got if r["file_id"] == "2")["size_bytes"] == 100
+
+
+def test_take_files_as_is_until_cap_walk_order() -> None:
+    batch = [
+        {"file_id": "a", "size_bytes": 4},
+        {"file_id": "huge", "size_bytes": 100},
+        {"file_id": "b", "size_bytes": 3},
+        {"file_id": "c", "size_bytes": 2},
+    ]
+    accounted: set[str] = set()
+    taken, used, full = _take_files_as_is_until_cap(
+        batch, cap_bytes=9, used_bytes=0, accounted=accounted, already_done=set(),
+    )
+    assert [r["file_id"] for r in taken] == ["a", "b", "c"]
+    assert "huge" not in {r["file_id"] for r in taken}
+    assert used == 9 and full is True
+
+
+def test_take_files_as_is_counts_already_done_toward_cap() -> None:
+    batch = [
+        {"file_id": "done1", "size_bytes": 6},
+        {"file_id": "new", "size_bytes": 5},
+        {"file_id": "small", "size_bytes": 3},
+    ]
+    accounted: set[str] = set()
+    taken, used, full = _take_files_as_is_until_cap(
+        batch, cap_bytes=10, used_bytes=0, accounted=accounted, already_done={"done1"},
+    )
+    assert [r["file_id"] for r in taken] == ["small"]
+    assert used == 9 and full is False
+
+
 if __name__ == "__main__":
     test_greedy_fill_backfills_around_oversized_item()
     test_greedy_fill_empty_and_exact_cap()
@@ -244,4 +296,7 @@ if __name__ == "__main__":
     test_allocate_equally_by_account_splits_evenly_ignoring_data_volume()
     test_allocate_equally_by_account_empty()
     test_allocate_equally_by_account_cannot_exceed_cap()
+    test_drive_rows_all_files_keeps_zero_size_natives()
+    test_take_files_as_is_until_cap_walk_order()
+    test_take_files_as_is_counts_already_done_toward_cap()
     print("OK")

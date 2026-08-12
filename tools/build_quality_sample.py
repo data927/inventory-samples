@@ -34,6 +34,20 @@ Usage:
   # Just your own Drive + Gmail (no service account)
   python tools/build_quality_sample.py
 
+  # One account — no quality scan/selection: walk My Drive and transfer everything
+  # into the AI Labs Sample Set folder
+  python tools/build_quality_sample.py --full-account
+  python tools/build_quality_sample.py \\
+      --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
+      --users alice@yourdomain.com --full-account
+
+  # As-is until 10GB (walk order, no quality scan) — transfer starts immediately
+  python tools/build_quality_sample.py --as-is
+  python tools/build_quality_sample.py --as-is --cap-gb 10
+  python tools/build_quality_sample.py \\
+      --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
+      --users alice@yourdomain.com --as-is --cap-gb 10
+
   python tools/build_quality_sample.py --drive-cap-gb 75 --gmail-cap-gb 12.5 \\
       --gsheets-limit 350 --gdocs-limit 300 --gslides-limit 150 \\
       --out out/quality_sample_manifest.json
@@ -1071,6 +1085,201 @@ def run_streaming_workspace_pipeline(
     return all_drive_selected, all_gmail_selected, native_counts
 
 
+def _drive_rows_all_files(rows: list[dict[str, Any]], *, default_owner: str = "") -> list[dict[str, Any]]:
+    """Every non-folder, non-shortcut file — including zero-size Google natives.
+
+    Unlike ``_bucket_drive_rows``, this does not drop Forms/Drawings/etc. Used by
+    ``--full-account`` transfer (copy everything, no quality filter).
+    """
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if r.get("is_folder") or r.get("is_shortcut"):
+            continue
+        fid = r.get("drive_file_id") or ""
+        if not fid:
+            continue
+        out.append({
+            "file_id": fid,
+            "name": r.get("name") or "",
+            "path": r.get("path") or "",
+            "owner_email": r.get("owner_email") or default_owner,
+            "size_bytes": _int_size(r.get("size_bytes")),
+            "modified_time": r.get("modified_time") or "",
+        })
+    return out
+
+
+def _take_files_as_is_until_cap(
+    batch: list[dict[str, Any]],
+    *,
+    cap_bytes: int | None,
+    used_bytes: int,
+    accounted: set[str],
+    already_done: set[str],
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Pick files in walk order until ``cap_bytes`` is filled.
+
+    Skips a file that does not fit and keeps looking for a smaller one. Files already
+    transferred (``already_done``) count toward the cap when rediscovered but are not
+    re-queued. Returns ``(to_transfer, new_used_bytes, cap_full)``.
+    """
+    taken: list[dict[str, Any]] = []
+    used = used_bytes
+    for row in batch:
+        fid = row["file_id"]
+        if fid in accounted:
+            continue
+        size = int(row.get("size_bytes") or 0)
+        if cap_bytes is not None and size > 0 and used + size > cap_bytes:
+            continue  # does not fit; try next
+        accounted.add(fid)
+        if size > 0:
+            used += size
+        if fid in already_done:
+            continue  # already on dest — counted, not re-queued
+        taken.append(row)
+        if cap_bytes is not None and used >= cap_bytes:
+            return taken, used, True
+    cap_full = cap_bytes is not None and used >= cap_bytes
+    return taken, used, cap_full
+
+
+def run_full_account_drive_transfer(
+    source_service,
+    email: str,
+    *,
+    folder_name: str,
+    dest_folder_id: str,
+    checkpoint_dir: Path,
+    modified_before: str | None = None,
+    folders_per_round: int = 50,
+    cap_bytes: int | None = None,
+    progress_log=_log,
+) -> list[dict[str, Any]]:
+    """Walk one account's My Drive and copy files as-is into AI Labs Sample Set.
+
+    Transfer starts as soon as the first round of folders is listed — a background
+    worker copies that batch while the walk continues. No quality selection, no Gmail.
+    If ``cap_bytes`` is set, keep taking walk-order files until that many bytes are
+    queued (skipping ones that do not fit), then stop. Resumable via checkpoint.
+    """
+    ckpt = checkpoint_dir / "ai_labs_samples.checkpoint.jsonl"
+    dest_service = build_drive_service(_get_rw_credentials())
+    dest_meta = _load_dest_meta(ckpt)
+    if dest_folder_id.strip():
+        dest_id = normalize_folder_id(dest_folder_id)
+        progress_log(f"[as-is] using existing dest folder id={dest_id}")
+    elif dest_meta and dest_meta.get("dest_folder_id"):
+        dest_id = str(dest_meta["dest_folder_id"])
+        folder_name = str(dest_meta.get("folder_name") or folder_name)
+        progress_log(f"[as-is] resuming into existing folder {folder_name!r} → {dest_id}")
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if folder_name == "AI Labs Sample Set":
+            folder_name = f"{folder_name} ({stamp})"
+        dest_id = _create_root_folder(dest_service, folder_name, parent_id="root")
+        progress_log(f"[as-is] created My Drive folder {folder_name!r} → {dest_id}")
+    _save_dest_meta(ckpt, dest_id, folder_name)
+
+    done = _load_done(ckpt)
+    folder_cache: dict[str, str] = {}
+    all_transferred: list[dict[str, Any]] = []
+    totals = {"ok": 0, "skip": 0, "fail": 0}
+    work_queue: queue.Queue = queue.Queue()
+    budget = max(1, folders_per_round)
+    used_bytes = 0
+    accounted: set[str] = set()
+
+    def _transfer_worker() -> None:
+        # Only this thread touches dest_service / done / folder_cache / all_transferred.
+        while True:
+            item = work_queue.get()
+            if item is None:
+                work_queue.task_done()
+                return
+            round_num, batch = item
+            ok = skip = fail = 0
+            for row in batch:
+                row["owner_email"] = email
+                fid = row["file_id"]
+                if fid in done:
+                    skip += 1
+                    continue
+                try:
+                    parent = _ensure_child_folder(dest_service, dest_id, email, folder_cache)
+                    new_id = _drive_copy(dest_service, fid, parent, row["name"])
+                    _append_done(ckpt, {
+                        "file_id": fid, "new_id": new_id, "bucket": email,
+                        "name": row["name"], "path": row["path"],
+                        "size_bytes": row.get("size_bytes") or 0,
+                        "mode": "copy", "status": "ok",
+                    })
+                    done.add(fid)
+                    ok += 1
+                    all_transferred.append(row)
+                except (HttpError, RuntimeError, OSError) as exc:
+                    fail += 1
+                    _append_done(ckpt, {
+                        "file_id": fid, "bucket": email, "name": row["name"], "path": row["path"],
+                        "status": "error", "error": str(exc)[:500],
+                    })
+                    progress_log(f"[as-is] FAIL {row['name'][:60]!r} — {exc}")
+            totals["ok"] += ok
+            totals["skip"] += skip
+            totals["fail"] += fail
+            progress_log(f"[as-is] round {round_num}: transferred ok={ok} skip={skip} fail={fail}")
+            work_queue.task_done()
+
+    worker = threading.Thread(target=_transfer_worker, daemon=True)
+    worker.start()
+    if cap_bytes is None:
+        cap_note = "no byte cap (entire account)"
+    else:
+        cap_note = f"cap {cap_bytes / GB:.2f}GB, walk order as-is"
+    progress_log(f"[as-is] transferring My Drive for {email} → {folder_name!r} "
+                 f"(starts immediately; {cap_note}; Drive only; {budget} folders/round)")
+
+    frontier = None
+    round_num = 0
+    path_prefix = f"My Drive ({email})"
+    while True:
+        round_num += 1
+        batch_rows, frontier = walk_my_drive_in_rounds(
+            source_service, path_prefix=path_prefix, frontier=frontier,
+            folder_budget=budget, modified_before=modified_before, progress_log=progress_log,
+        )
+        batch = _drive_rows_all_files(batch_rows, default_owner=email)
+        taken, used_bytes, cap_full = _take_files_as_is_until_cap(
+            batch, cap_bytes=cap_bytes, used_bytes=used_bytes,
+            accounted=accounted, already_done=done,
+        )
+        if taken:
+            progress_log(
+                f"[as-is] round {round_num}: listed {len(batch)} → queued {len(taken)} "
+                f"({used_bytes / GB:.2f}GB"
+                + (f" / {cap_bytes / GB:.2f}GB)" if cap_bytes is not None else ")")
+            )
+            work_queue.put((round_num, taken))
+        else:
+            progress_log(f"[as-is] round {round_num}: listed {len(batch)} → queued 0 "
+                         f"({used_bytes / GB:.2f}GB)")
+        if cap_full:
+            progress_log(f"[as-is] cap reached ({used_bytes / GB:.2f}GB) — stopping walk")
+            break
+        if not frontier:
+            break
+
+    progress_log("[as-is] walk done — waiting for transfer queue to drain...")
+    work_queue.put(None)
+    worker.join()
+
+    progress_log(f"[as-is] done {email}: ok={totals['ok']} skip={totals['skip']} "
+                 f"fail={totals['fail']} bytes={used_bytes / GB:.2f}GB — "
+                 f"https://drive.google.com/drive/folders/{dest_id}")
+    return all_transferred
+
+
+
 def run_streaming_single_account_drive(
     service,
     *,
@@ -1347,7 +1556,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--users", nargs="+", metavar="EMAIL",
                     help="Workspace mode only: scan just these users instead of the whole domain "
                          "(space- or comma-separated; skips Admin SDK enumeration entirely)")
+    p.add_argument("--full-account", action="store_true",
+                    help="Transfer one account's entire My Drive into the AI Labs Sample Set "
+                         "folder — no quality scan, no byte caps, Drive only (no Gmail). "
+                         "My Drive mode: signed-in account. Workspace mode: pass exactly one "
+                         "--users EMAIL.")
+    p.add_argument("--as-is", action="store_true",
+                    help="Transfer Drive files as-is (walk order) into AI Labs Sample Set — "
+                         "no quality scan, Drive only. Stops at --cap-gb (default 10GB). "
+                         "Same account rules as --full-account.")
+    p.add_argument("--cap-gb", type=float, default=None, metavar="GB",
+                    help="Byte cap for --as-is / --full-account (GB). Default: 10 with --as-is; "
+                         "unlimited with --full-account alone.")
     args = p.parse_args(argv)
+
+    if args.full_account and args.as_is:
+        print("ERROR: use either --full-account or --as-is, not both", flush=True)
+        return 1
 
     sa_file = Path(args.service_account).expanduser().resolve() if args.service_account else None
     admin_email = args.admin_email or os.environ.get("GOOGLE_ADMIN_EMAIL", "").strip()
@@ -1384,6 +1609,72 @@ def main(argv: list[str] | None = None) -> int:
     out_path = (_ROOT / args.out).resolve()
     scan_cache_dir = out_path.parent
     scan_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- As-is / full-account Drive transfer (no quality scan / selection / Gmail) ---
+    if args.full_account or args.as_is:
+        mode_label = "full-account" if args.full_account else "as-is"
+        if args.scan_only:
+            print(f"ERROR: --{mode_label} transfers immediately; --scan-only is not supported", flush=True)
+            return 1
+        if args.cap_gb is not None and args.cap_gb <= 0:
+            print("ERROR: --cap-gb must be > 0", flush=True)
+            return 1
+        if workspace_mode:
+            if len(selected_users) != 1:
+                print(f"ERROR: --{mode_label} in workspace mode requires exactly one --users EMAIL", flush=True)
+                return 1
+            email = selected_users[0]
+            creds = get_service_account_credentials(sa_file, email, SCOPES_READONLY)
+            source_svc = build_drive_service(creds)
+        else:
+            if selected_users:
+                print("ERROR: --users requires --service-account (Domain-Wide Delegation)", flush=True)
+                return 1
+            source_svc = my_drive_service()
+            # Resolve the signed-in account email for the dest subfolder name.
+            try:
+                about = source_svc.about().get(fields="user(emailAddress)").execute()
+                email = (about.get("user") or {}).get("emailAddress") or "me"
+            except HttpError:
+                email = "me"
+
+        if args.full_account:
+            cap_bytes = int(args.cap_gb * GB) if args.cap_gb is not None else None
+        else:
+            # --as-is: default 10GB
+            cap_bytes = int((args.cap_gb if args.cap_gb is not None else 10.0) * GB)
+
+        if cap_bytes is None:
+            _log(f"[mode] {mode_label} Drive transfer for {email} (entire account, no Gmail)")
+        else:
+            _log(f"[mode] {mode_label} Drive transfer for {email} "
+                 f"(as-is until {cap_bytes / GB:.2f}GB, no Gmail)")
+
+        # Small rounds so the first batch is listed quickly and transfer starts right away.
+        folders_per_round = args.folders_per_round if args.folders_per_round > 0 else 50
+        transferred = run_full_account_drive_transfer(
+            source_svc, email,
+            folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,
+            checkpoint_dir=scan_cache_dir, modified_before=drive_before,
+            folders_per_round=folders_per_round, cap_bytes=cap_bytes, progress_log=_log,
+        )
+        total_bytes = sum(r.get("size_bytes") or 0 for r in transferred)
+        manifest = {
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "scan_mode": "as_is_drive_transfer" if cap_bytes is not None else "full_account_drive_transfer",
+            "account": email,
+            "cap_bytes": cap_bytes,
+            "drive_total_bytes": total_bytes,
+            "files": [
+                {"file_id": c["file_id"], "name": c["name"], "path": c["path"],
+                 "size_bytes": c["size_bytes"], "owner_email": c["owner_email"]}
+                for c in transferred
+            ],
+            "gmail_threads": [],
+        }
+        out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        _log(f"manifest written: {out_path} (files={len(transferred)}, {total_bytes / GB:.2f}GB)")
+        return 0
 
     drive_cap_bytes = int(args.drive_cap_gb * GB)
     gmail_cap_bytes = int(args.gmail_cap_gb * GB)

@@ -17,12 +17,16 @@ company-dump/
   anything-else/
 ```
 
-From each subfolder it takes files in order (whatever comes first), up to:
+**One account as the full sample** — use `--only` with a single folder name. That copies that account's **entire** data (no 1000-file / 15GB trim):
 
-- **1000 files** per subfolder (or fewer if the folder has less)
-- **15GB overall**, split equally across the subfolders
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A"
+```
 
-If a subfolder is smaller than its share / has fewer than 1000 files, **all that fits** is copied.
+**Multiple accounts** — from each subfolder:
+
+1. Take up to **1000 files** first (or fewer if the folder has less)
+2. If the total is still under **15GB**, keep taking **more files** from those folders until 15GB is reached
 
 Copies land on your **Desktop**, keeping the same subfolder names:
 
@@ -126,6 +130,32 @@ Your dump is any parent folder with subfolders inside:
   Folder B/
 ```
 
+### Entire data of one account (recommended sample)
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
+```
+
+Windows:
+
+```
+python tools/build_quality_sample_local.py --root C:\Users\YourName\Downloads\company-dump --only "Folder A" --entire
+```
+
+That copies **everything** under `Folder A` onto the Desktop (no 1000-file / 15GB trim).
+
+### As-is until 10GB
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is
+```
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+```
+
+### All subfolders (capped sample)
+
 **Run** — replace the path with your real parent folder:
 
 Mac / Linux:
@@ -156,19 +186,31 @@ out/quality_sample_local_manifest.json
 
 ## Optional flags
 
-**Different file limit (default 1000 per subfolder):**
+**Entire data of one account (use `--entire`):**
 
 ```
-python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --limit 500
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
 ```
 
-**Different byte cap (default 15GB overall):**
+**As-is until 10GB:**
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+```
+
+**Different per-folder first pass (default 1000 when multiple folders, then fill to 15GB):**
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --limit 1000
+```
+
+**Different overall byte cap (default 15GB for multi-folder; unlimited for one account):**
 
 ```
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --cap-gb 15
 ```
 
-**Only some subfolders:**
+**Only some subfolders (two or more → capped sample again):**
 
 ```
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" "Folder B"
@@ -220,6 +262,13 @@ Use **this** script for local. Use the other guide for Google.
 cd ~/inventory-segmentor
 source .venv/bin/activate
 
+# Entire data of one account
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
+
+# As-is until 10GB
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+
+# Or multi-folder capped sample
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
 ```
 
@@ -228,5 +277,5 @@ Windows:
 cd %USERPROFILE%\inventory-segmentor
 .venv\Scripts\activate
 
-python tools/build_quality_sample_local.py --root C:\Users\YourName\Downloads\company-dump
+python tools/build_quality_sample_local.py --root C:\Users\YourName\Downloads\company-dump --only "Folder A"
 ```

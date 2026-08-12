@@ -98,11 +98,23 @@ Point at any parent folder. **Every immediate subfolder** is processed — names
   ...
 ```
 
-Skips Parts 3–8. Copies up to **1000 files per subfolder** under a **15GB** overall cap (split equally across subfolders) onto the **Desktop**.
+Skips Parts 3–8. **`--entire`**: one account's full data. **`--as-is`**: walk order until **10GB**. **Default multi-folder**: first **1000 files** each, then fill to **15GB**. Copies onto the **Desktop**.
 
 Full local-only guide: `CLIENT_SETUP_AI_LABS_SAMPLES_LOCAL.docx`
 
-**Run**
+**Run — entire data of one account**
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" --entire
+```
+
+**Run — as-is until 10GB**
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --as-is --cap-gb 10
+```
+
+**Run — all subfolders (capped sample)**
 
 Mac / Linux:
 
@@ -127,13 +139,13 @@ Desktop/AI Labs Sample Set (YYYY-MM-DD)/
 **Useful variants**
 
 ```
-# Different per-folder file limit
+# First-pass file count per folder (default 1000 when multiple), then fill to 15GB
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --limit 1000
 
-# Different overall byte cap (default 15GB)
+# Overall byte cap (default 15GB when multiple folders)
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --cap-gb 15
 
-# Specific subfolders only
+# Specific subfolders only (one name = entire account; two+ = capped sample)
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" "Folder B"
 
 # Explicit destination path
@@ -206,8 +218,32 @@ Native Docs/Sheets/Slides sit **on top of** the 15GB binary cap.
 
 ### 5A — My Drive only (no Service Account)
 
+**Quality sample (capped scan + transfer):**
+
 ```
 python tools/build_quality_sample.py
+```
+
+**Entire account — Drive only (no quality scan, no caps, no Gmail):**
+
+Creates `AI Labs Sample Set (date)` in your My Drive and starts copying **immediately** — first folders are listed, then transfer runs in the background while the rest of the Drive is walked. Copies **every** file from the signed-in account.
+
+```
+python tools/build_quality_sample.py --full-account
+```
+
+**As-is until 10GB (no quality scan):**
+
+Same immediate transfer, walk order as-is, stops when **10GB** of file data is queued. No Gmail.
+
+```
+python tools/build_quality_sample.py --as-is
+```
+
+Different size:
+
+```
+python tools/build_quality_sample.py --as-is --cap-gb 10
 ```
 
 ### 5B — Whole Workspace (Service Account + Domain-Wide Delegation)
@@ -246,7 +282,39 @@ python tools/build_quality_sample.py \
   --admin-email admin@yourdomain.com
 ```
 
-**Run — specific users only**
+**Run — one account, entire My Drive (transfer only, no quality scan)**
+
+Creates `AI Labs Sample Set (date)` and starts copying **as soon as the script begins** (walk and transfer overlap). Copies **everything** from that user's My Drive. No 15GB/12.5GB caps, no Gmail.
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com \
+  --full-account
+```
+
+**Run — one account, as-is until 10GB (no quality scan)**
+
+Walk order as-is, transfer starts immediately, stops once **10GB** is fulfilled. No Gmail.
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com \
+  --as-is
+```
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com \
+  --as-is --cap-gb 10
+```
+
+**Run — specific users only (capped quality sample)**
 
 ```
 python tools/build_quality_sample.py \
@@ -299,6 +367,9 @@ If Part 5 transferred everything → skip to **Part 7**.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
+| `--full-account` | off | Entire My Drive of one account → AI Labs Sample Set (no quality scan/caps/Gmail) |
+| `--as-is` | off | Walk-order Drive copy until `--cap-gb` (default 10GB); no quality scan/Gmail |
+| `--cap-gb` | `10` with `--as-is` | Byte cap (GB) for `--as-is` / optional trim for `--full-account` |
 | `--drive-cap-gb` | `15` | Drive binary cap (GB) |
 | `--gmail-cap-gb` | `12.5` | Gmail cap (GB) |
 | `--gsheets-limit` | `350` | Google Sheets count |
@@ -467,7 +538,23 @@ Default manifest: `out/quality_sample_manifest.json` (override with `--manifest`
 # Local dump → Desktop (every subfolder under --root)
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
 
-# My Drive only
+# One account — entire My Drive → AI Labs Sample Set (no quality scan)
+python tools/build_quality_sample.py --full-account
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com \
+  --full-account
+
+# As-is until 10GB (walk order, transfer starts immediately)
+python tools/build_quality_sample.py --as-is
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com \
+  --as-is --cap-gb 10
+
+# My Drive only (capped quality sample)
 python tools/build_quality_sample.py
 
 # Whole Workspace + transfer
