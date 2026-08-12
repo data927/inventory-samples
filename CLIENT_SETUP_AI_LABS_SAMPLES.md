@@ -1,27 +1,8 @@
-# AI Labs Sample Set — End-to-End Setup Guide
+# AI Labs Sample Set — Setup Guide
 
-This guide is self-contained — it does not assume you've set up or run anything else in this repo before. It builds a curated sample set in **your own Google Drive** (and, optionally, your own Gmail).
+Follow every step in order. Copy each command exactly.
 
-It creates a new folder like `AI Labs Sample Set (YYYY-MM-DD)` in your My Drive, with subfolders, and copies the selected files into it. Gmail threads (if you build a manifest that includes them) go into your own Gmail Inbox instead. By default, Part 5 scans, selects, **and transfers** in one run — no separate manual step needed.
-
-You sign in with **your** Google account for the copy step. No shared folder and no one else's token is required.
-
-There are two roles in this guide:
-
-- **Client** — signs in with their own Google account and runs the copy steps (Parts 1, 2, 3, 4, 6, 8). No admin access needed. Only relevant if the operator used `--scan-only` in Part 5 (see below) instead of transferring it themselves.
-- **Operator** — the person running the extraction for this engagement (Part 5). A Service Account with Domain-Wide Delegation is only needed if they're building a manifest across the **whole Workspace**; scanning just their own Drive + Gmail needs no extra setup beyond Part 3/4. By default the operator also signs in once as the destination account (same as Parts 4/8) so Part 5 can transfer everything itself in the same run — pass `--scan-only` instead if the operator and the destination account owner are different people.
-
----
-
-## What you need
-
-- A Google account — the one whose Drive/Gmail you're building samples in
-- Python 3 and Git (steps below if you don't have them)
-- Access to [Google Cloud Console](https://console.cloud.google.com/) with that same Google account, to create an OAuth client (Part 3 — free, ~5 minutes, one time)
-- **(Operator, Part 5 — whole-Workspace mode only)** A Service Account JSON with Domain-Wide Delegation, and a Workspace super-admin email — covered in full in Part 5
-- **(Optional, Part 8 — Gmail thread samples)** The `gmail.insert` scope added to your OAuth client's consent screen — covered in full in Part 8
-
-**You do not need** an Anthropic / OpenAI / Gemini API key for any of this.
+**You do not need** an Anthropic / OpenAI / Gemini API key.
 
 ---
 
@@ -31,14 +12,12 @@ There are two roles in this guide:
 
 1. Go to: **https://www.python.org/downloads/**
 2. Download and run the installer.
-   - **Important (Windows):** check **"Add Python to PATH"** before Install.
-3. Verify in Terminal / Command Prompt:
+   - **Windows:** check **"Add Python to PATH"** before Install.
+3. Verify:
 
 ```
 python --version
 ```
-
-You should see something like `Python 3.12.x`.
 
 ### 2. Install Git
 
@@ -52,9 +31,7 @@ git --version
 
 ---
 
-## Part 1 — Get the Code
-
-Open **Terminal** (Mac) or **Command Prompt** (Windows).
+## Part 1 — Get the code
 
 ```
 cd ~
@@ -64,25 +41,19 @@ cd ~
 git clone https://github.com/data927/inventory-segmentor.git
 ```
 
-> Or use the exact link / zip you were given.
-
 ```
 cd inventory-segmentor
 ```
-
-Confirm the clone worked:
 
 ```
 ls tools/build_quality_sample.py
 ```
 
-For most engagements, Part 5 below builds a **fresh** sample manifest by scanning live — that's what you'll actually use in Part 6. The repo also carries one legacy fixed list, `data/ai_labs_1200_balanced_sample.json`, kept only as a fallback default for Part 6 if Part 5 is skipped entirely.
-
 ---
 
 ## Part 2 — Python environment
 
-**Create the virtual environment:**
+**Create venv**
 
 Mac / Linux:
 ```
@@ -94,7 +65,7 @@ Windows:
 python -m venv .venv
 ```
 
-**Activate it:**
+**Activate**
 
 Mac / Linux:
 ```
@@ -108,7 +79,7 @@ Windows:
 
 You should see `(.venv)` at the start of the line.
 
-**Install packages:**
+**Install packages**
 
 ```
 pip install -r requirements.txt
@@ -116,112 +87,155 @@ pip install -r requirements.txt
 
 ---
 
-## Part 3 — Create a Google Cloud OAuth client
+## Local dump — any parent folder (no Google needed)
 
-This is the one-time Google Cloud Console setup that lets this tool sign in as you and access your Drive/Gmail. If someone already handed you a `client_secret_....json` file for this exact project, you can skip to Part 4 — otherwise, here's where it comes from:
+Point at any parent folder. **Every immediate subfolder** is processed — names do not matter.
 
-1. Go to **https://console.cloud.google.com/** and sign in with the Google account you'll use for this tool.
-2. **Create a project** — top-left project dropdown → **New Project** → give it any name (e.g. `AI Labs Sample Set`) → **Create**. Wait ~30 seconds for it to finish provisioning, then make sure it's selected in that same dropdown.
-3. **Enable the APIs you'll need** — left menu → **APIs & Services** → **Library**:
-   - Search **Google Drive API** → **Enable**
-   - Search **Gmail API** → **Enable** (skip this one only if you're certain you'll never use Part 8)
-4. **Configure the OAuth consent screen** — **APIs & Services** → **OAuth consent screen**:
-   - User type: **External** (unless this Google account belongs to a Google Workspace org you manage, in which case **Internal** also works) → **Create**
-   - Fill in **App name**, **User support email**, and **Developer contact email** (any values are fine — this app is only ever used by you) → **Save and Continue**
-   - **Scopes**: click **Add or Remove Scopes**, search for and check:
-     - `.../auth/drive` (full Drive access — needed to create the sample folder and copy files in Part 6)
-     - `.../auth/gmail.insert` (only if you'll use Part 8 — Gmail thread samples; you can add this later instead, see Part 8)
-     → **Update** → **Save and Continue**
-   - **Test users**: click **Add Users** and add the Google account you'll sign in with. This is required while the app is in **Testing** publish status — without it, sign-in will be blocked with an error → **Save and Continue** → **Back to Dashboard**
-5. **Create the OAuth client** — **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth client ID**:
-   - Application type: **Desktop app**
-   - Name it anything (e.g. `Inventory Segmentor`) → **Create**
-   - A dialog shows your client ID/secret — click **Download JSON**
-6. Save that downloaded file somewhere you can find it (e.g. your Downloads folder). You'll point the tool at it in Part 4.
+```
+/path/to/main/
+  Folder A/
+  Folder B/
+  ...
+```
 
-> **If you're the operator and will also do Part 5's Workspace mode:** this same Cloud project can hold the Service Account from Part 5 too — you don't need a second project. The OAuth client here and the Service Account there are separate, independent credentials that happen to live in the same place; either reuse this project or use a different one, both work.
+Skips Parts 3–8. Copies the **first 1000 files** in each subfolder onto the **Desktop**.
+
+Full local-only guide: `CLIENT_SETUP_AI_LABS_SAMPLES_LOCAL.docx`
+
+**Run**
+
+Mac / Linux:
+
+```
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
+```
+
+Windows:
+
+```
+python tools/build_quality_sample_local.py --root C:\Users\YourName\Downloads\company-dump
+```
+
+Creates:
+
+```
+Desktop/AI Labs Sample Set (YYYY-MM-DD)/
+  Folder A/
+  Folder B/
+```
+
+**Useful variants**
+
+```
+# Different per-folder limit
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --limit 1000
+
+# Specific subfolders only
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" "Folder B"
+
+# Explicit destination path
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --dest "~/Desktop/AI Labs Sample Set"
+```
+
+Manifest: `out/quality_sample_local_manifest.json`
 
 ---
 
-## Part 4 — Connect the tool to your OAuth credentials
+## Part 3 — Create a Google Cloud OAuth client
+
+One-time. If you already have a `client_secret_....json` for this project, skip to Part 4.
+
+1. Open **https://console.cloud.google.com/** — sign in with the Google account you'll use.
+2. Top-left project dropdown → **New Project** → name it (e.g. `AI Labs Sample Set`) → **Create**. Select it when ready.
+3. **APIs & Services** → **Library**:
+   - Enable **Google Drive API**
+   - Enable **Gmail API** (needed for Gmail samples)
+4. **APIs & Services** → **OAuth consent screen**:
+   - User type: **External** (or **Internal** if Workspace you manage) → **Create**
+   - Fill **App name**, **User support email**, **Developer contact email** → **Save and Continue**
+   - **Scopes** → **Add or Remove Scopes** → check:
+     - `.../auth/drive`
+     - `.../auth/gmail.insert` (if you'll copy Gmail threads)
+   - → **Update** → **Save and Continue**
+   - **Test users** → **Add Users** → add your Google account → **Save and Continue** → **Back to Dashboard**
+5. **APIs & Services** → **Credentials** → **Create Credentials** → **OAuth client ID**:
+   - Application type: **Desktop app**
+   - Name → **Create** → **Download JSON**
+6. Keep the downloaded file (e.g. `~/Downloads/client_secret_xxxx.json`).
+
+---
+
+## Part 4 — Connect OAuth credentials
 
 ```
 python setup.py
 ```
 
-- **API key** prompt → press Enter to skip (not needed for sampling).
-- **"Set up Google Drive access? (y/n)"** → type `y`.
-- **"Path to OAuth client JSON file"** → paste the path to the file you downloaded in Part 3, e.g.:
-  - Mac: `~/Downloads/client_secret_xxxx.json`
-  - Windows: `C:\Users\YourName\Downloads\client_secret_xxxx.json`
-- It copies that file to `.secrets/google_oauth_client.json` and asks to authorize now — type `y`. A browser tab opens; sign in with the same Google account and click **Allow**.
+Prompts:
+1. **API key** → press Enter (skip).
+2. **Set up Google Drive access? (y/n)** → `y`
+3. **Path to OAuth client JSON file** → paste path, e.g.:
+   - Mac: `~/Downloads/client_secret_xxxx.json`
+   - Windows: `C:\Users\YourName\Downloads\client_secret_xxxx.json`
+4. Authorize now → `y` → browser → sign in → **Allow**
 
-> **Manual alternative**, if you'd rather not use the wizard: copy the downloaded JSON to `.secrets/google_oauth_client.json` yourself, or set `GOOGLE_OAUTH_CLIENT_SECRETS=/path/to/file.json` in `.env`.
+Manual alternative: copy the JSON to `.secrets/google_oauth_client.json`, or set `GOOGLE_OAUTH_CLIENT_SECRETS=/path/to/file.json` in `.env`.
 
 ---
 
-## Part 5 — Build a fresh, size-capped sample manifest
+## Part 5 — Build sample (scan + transfer)
 
-**Skip this part if you're the client running a manifest someone already built for you — jump to Part 6.** This part is for whoever is running the extraction for the engagement.
+Skip if someone already gave you a manifest → go to Part 6.
 
-`data/ai_labs_1200_balanced_sample.json` (used by default in Part 6) is a fixed, hand-picked list. `tools/build_quality_sample.py` instead scans live and builds a fresh manifest, in one of two modes — **picked automatically** depending on what auth you give it:
+Default: scans, selects, and copies into your Drive (and Gmail if included) in one run.
 
-- **Workspace mode** — pass `--service-account` + `--admin-email` (Domain-Wide Delegation): scans **every user's** My Drive + Shared Drives + Gmail across the whole org.
-- **My Drive mode** — run it with no service account: scans just **your own** Drive + Gmail, reusing the OAuth token from Part 4. If you haven't yet authorized Gmail access specifically, a browser opens once the first time it's needed.
+### Caps / selection (defaults)
 
-Either way, the manifest is built using these selection rules:
+| Source | Rule |
+| --- | --- |
+| Binary Drive files | Largest first, up to **15GB** |
+| Gmail threads | Whole threads, largest first, up to **12.5GB** |
+| Google Sheets | 350 (most recent) |
+| Google Docs | 300 (most recent) |
+| Google Slides | 150 (most recent) |
 
-- **Binary files** (PDFs, Office docs, images, etc.) — largest first (size is used as a quality proxy; there's no LLM scoring pass) until the **~15GB** Drive cap is hit.
-- **Gmail threads** — largest first, until the **~10–15GB** cap (default 12.5GB) is hit. Grouped into **whole threads** before selection — a thread is included or skipped as one unit, so a thread never gets split across the include/exclude line.
-- **Google-native Docs/Sheets/Slides** — these have no fixed byte size, so they can't be size-ranked. Instead each type gets its own fixed count, most-recently-modified first, **on top of** (not counted against) the 15GB Drive cap:
-  - **Google Sheets:** 350
-  - **Google Docs:** 300
-  - **Google Slides:** 150
+Native Docs/Sheets/Slides sit **on top of** the 15GB binary cap.
 
-**In Workspace mode specifically**, every rule above is applied *per account* first, so one account can't crowd out everyone else — but Drive and Gmail use different fairness strategies:
+### 5A — My Drive only (no Service Account)
 
-- **Binary files (Drive):** every account is guaranteed a small minimal slice of the 15GB cap first — no account with data is ever fully shut out, even if its files are large and don't neatly fit a proportional share. Whatever's left of the cap is then filled in **priority order** (accounts with more data going first each round) until the cap is used up. In the typical case this means bigger accounts end up with proportionally more; in rare cases (very few accounts, or a cap barely bigger than one account's smallest file) the guarantee can cost a big account a bit of its edge — that trade-off is intentional so nobody gets zero.
-- **Gmail threads:** the 12.5GB cap is split **equally** across accounts (not weighted by how much data each account has) — every account gets the same nominal share. If a share can't be filled exactly (an account's threads don't fit its slice evenly), the leftover is reclaimed and reused so the full cap still gets used — this can let an account end up with a bit more than its nominal equal share, the same full-utilization trade-off as Drive's guarantee.
-- **Native Sheets/Docs/Slides:** every account is guaranteed its own baseline first (most-recently-modified) — **30 Sheets, 40 Docs, 20 Slides per account** by default. If that guaranteed total is still under the overall target (350/300/150), the remainder is topped up with the next most-recently-modified files from anywhere in the Workspace. The per-account guarantee is never trimmed back down, so with enough accounts the final total can end up above the overall target — that's expected.
+```
+python tools/build_quality_sample.py
+```
 
-In My Drive mode there's only one account, so all of this simplifies back to plain global behavior.
+### 5B — Whole Workspace (Service Account + Domain-Wide Delegation)
 
-### Prerequisite for Workspace mode: Service Account + Domain-Wide Delegation
+**Operator — create Service Account**
 
-Skip this whole box for My Drive mode — nothing extra is needed there beyond Part 3/4.
+1. [Google Cloud Console](https://console.cloud.google.com/) → project (can reuse Part 3) → **IAM & Admin** → **Service Accounts** → **Create Service Account** → name → **Done**.
+2. Service account → **Keys** → **Add Key** → **Create new key** → **JSON** → save the file.
+3. **Details** → **Advanced settings** → copy **Client ID** → enable Domain-wide delegation if shown.
+4. **APIs & Services** → **Library** → enable **Google Drive API**, **Admin SDK API**, **Gmail API**.
+5. Send only the **Client ID** to the Workspace super-admin (not the JSON key).
 
-**Two different people are usually involved here** — don't assume one person needs to do all of this:
+**Workspace super-admin — authorize**
 
-- **The operator** (whoever is running this extraction — often an external vendor, not the client's own staff) does almost everything below: creates the Service Account, gets its Client ID, enables the APIs. A regular Google account with access to *any* Google Cloud project is enough — no special access to the target Workspace is needed for this part.
-- **The target Workspace's own super-admin** (the client's IT admin) is the **only** person who can do step 4 — it happens inside `admin.google.com` for that specific Workspace, which an outside operator has no access to. The operator sends them the Client ID (never the JSON key file — that stays private) and asks them to authorize it.
+6. [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste Client ID + scopes:
 
-**Done by the operator (~5 minutes):**
+```
+https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
+```
 
-1. **Create a Service Account** — [Google Cloud Console](https://console.cloud.google.com/) → a project you control (this can be the same project from Part 3, or a separate one — either works) → **IAM & Admin** → **Service Accounts** → **Create Service Account** → give it any name (e.g. `inventory-scanner`) → **Create and Continue** → **Done**.
-2. Click the service account → **Keys** tab → **Add Key** → **Create new key** → **JSON**. The file downloads automatically — save it somewhere safe. This file is a credential — treat it like a password.
-3. Still on the service account page → **Details** tab → expand **Advanced settings** → copy the **Client ID** (a long number) → turn on **Domain-wide delegation** if there's a checkbox for it.
-4. **Enable the APIs** — Cloud Console → **APIs & Services** → **Library** → enable **Google Drive API**, **Admin SDK API**, and **Gmail API** (in the same project as the service account).
-5. Send just the **Client ID** to the target Workspace's super-admin, and ask them to do the next step.
+→ **Authorise**. Wait 5–10 min if first run fails with `unauthorized_client`.
 
-**Done by the target Workspace's super-admin** (a different Google account/organization than the operator, if this is a client engagement):
+**Operator — save credentials**
 
-6. **Authorize the scopes** — go to [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste the Client ID the operator sent you and add these three scopes (comma-separated):
-   ```
-   https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
-   ```
-   → **Authorise**. Propagation can take a few minutes — if the first run fails with `unauthorized_client` or `access_denied`, wait 5–10 minutes and retry.
+```
+python setup.py
+```
 
-**Back to the operator, once step 6 is confirmed authorized:**
+When asked `Set up Service Account for full workspace scan? (y/n)` → `y` → path to JSON key → Workspace super-admin email (e.g. `admin@yourdomain.com`).
 
-7. Run the wizard to save the credentials:
-   ```
-   python setup.py
-   ```
-   When it asks `Set up Service Account for full workspace scan? (y/n)`, type `y`, paste the path to the service account JSON key from step 2, and paste the target Workspace's super-admin email (e.g. `admin@yourdomain.com` — a real Workspace user, not the service account's own email).
-
-### Run it
-
-Workspace-wide:
+**Run — whole Workspace (scan + transfer)**
 
 ```
 python tools/build_quality_sample.py \
@@ -229,7 +243,7 @@ python tools/build_quality_sample.py \
   --admin-email admin@yourdomain.com
 ```
 
-Just a few specific accounts in the Workspace, instead of everyone:
+**Run — specific users only**
 
 ```
 python tools/build_quality_sample.py \
@@ -238,7 +252,7 @@ python tools/build_quality_sample.py \
   --users alice@yourdomain.com bob@yourdomain.com
 ```
 
-Only things dated before a cutoff (e.g. everything before this year):
+**Run — only items before a date**
 
 ```
 python tools/build_quality_sample.py \
@@ -247,7 +261,7 @@ python tools/build_quality_sample.py \
   --before 2026-01-01
 ```
 
-A huge Workspace, scanning each account in batches and stopping early once there's enough:
+**Run — huge Workspace (faster streaming; less fairness)**
 
 ```
 python tools/build_quality_sample.py \
@@ -256,94 +270,60 @@ python tools/build_quality_sample.py \
   --folders-per-round 1000
 ```
 
-Just your own Drive + Gmail:
+**Run — manifest only (no transfer; hand off to someone else)**
 
 ```
-python tools/build_quality_sample.py
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --scan-only
 ```
 
-This can take a while for a large Workspace — it caches scan progress under `out/` (`*.drive_scan_cache.jsonl`, `gmail_ids__*.txt`), so re-running the same command resumes rather than rescanning from zero.
+**Force a fresh scan** (if `out/quality_sample_manifest.json` already exists)
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --rescan
+```
+
+Re-run the **same** command anytime to resume (scan or transfer).
+
+If Part 5 transferred everything → skip to **Part 7**.
 
 ### Optional flags
 
-| Flag | Default | What it does |
+| Flag | Default | Meaning |
 | --- | --- | --- |
-| `--drive-cap-gb` | `15` | Byte cap for binary Drive files, in GB (split across accounts by data volume in Workspace mode) |
-| `--gmail-cap-gb` | `12.5` | Gmail selection cap, in GB (same per-account split) |
-| `--gsheets-limit` | `350` | Overall target total for Google Sheets, most-recently-modified first |
-| `--gdocs-limit` | `300` | Overall target total for Google Docs |
-| `--gslides-limit` | `150` | Overall target total for Google Slides |
-| `--gsheets-per-account` | `30` | Google Sheets guaranteed per account (Workspace mode) |
-| `--gdocs-per-account` | `40` | Google Docs guaranteed per account (Workspace mode) |
-| `--gslides-per-account` | `20` | Google Slides guaranteed per account (Workspace mode) |
-| `--out` | `out/quality_sample_manifest.json` | Where the manifest is written |
-| `--gmail-query` | (none) | Gmail search query to filter candidate messages (e.g. `after:2024/01/01`) |
-| `--before` | (none) | Only scan Drive files and Gmail messages dated before this date (`YYYY-MM-DD`). Applies to both sources at once — Drive folders are still always traversed regardless of their own modified time, so an old file inside a recently-touched folder is never missed. |
-| `--skip-drive` | off | Skip Drive scanning entirely |
-| `--skip-gmail` | off | Skip Gmail scanning entirely |
-| `--users` | (whole domain) | Workspace mode only: scan just these accounts instead of everyone — space- or comma-separated emails, e.g. `--users a@co.com b@co.com`. Skips Admin SDK enumeration entirely, so it doesn't even need the Admin SDK API/scope. |
-| `--folders-per-round` | `0` (off) | `0` (default): thorough global mode — scan everything, then select fairly, then transfer. A number > `0`: fast streaming mode — scan/select/transfer in batches of N folders (Drive) with scanning and transferring happening concurrently, no cross-account fairness — see below. Works in both Workspace mode (batches = accounts) and single-account "My Drive + Gmail only" mode (batches = rounds of N folders within the one account). Also turns on Gmail round-streaming (see `--messages-per-round`). |
-| `--messages-per-round` | `2000` | Gmail's equivalent of `--folders-per-round`: batch size in messages. Only takes effect when `--folders-per-round > 0`. See **Speeding up huge Workspaces** below. |
-| `--rescan` | off | Force a fresh scan even if `--out` already exists — see **Resuming** below. |
-| `--scan-only` | off | Stop after writing the manifest — don't transfer into the destination folder (transferring is the default now — see **Transferring automatically** below). |
-| `--folder-name` | `AI Labs Sample Set` | Destination My Drive folder name (date suffix added automatically) |
-| `--dest-folder-id` | (none) | Use an existing destination folder ID/URL instead of creating a new one |
+| `--drive-cap-gb` | `15` | Drive binary cap (GB) |
+| `--gmail-cap-gb` | `12.5` | Gmail cap (GB) |
+| `--gsheets-limit` | `350` | Google Sheets count |
+| `--gdocs-limit` | `300` | Google Docs count |
+| `--gslides-limit` | `150` | Google Slides count |
+| `--gsheets-per-account` | `30` | Sheets guaranteed per account (Workspace) |
+| `--gdocs-per-account` | `40` | Docs guaranteed per account (Workspace) |
+| `--gslides-per-account` | `20` | Slides guaranteed per account (Workspace) |
+| `--out` | `out/quality_sample_manifest.json` | Manifest path |
+| `--gmail-query` | (none) | Gmail search filter |
+| `--before` | (none) | Only items before `YYYY-MM-DD` |
+| `--skip-drive` | off | Skip Drive |
+| `--skip-gmail` | off | Skip Gmail |
+| `--users` | (whole domain) | Limit to these emails |
+| `--folders-per-round` | `0` | `0` = full scan then transfer; `>0` = streaming batches |
+| `--messages-per-round` | `2000` | Gmail batch size when streaming |
+| `--rescan` | off | Force fresh scan |
+| `--scan-only` | off | Manifest only, no transfer |
+| `--folder-name` | `AI Labs Sample Set` | Destination folder name |
+| `--dest-folder-id` | (none) | Use existing folder ID/URL |
 
-### Resuming
-
-If `--out` already points at a manifest file that exists, the script **skips scanning entirely** and goes straight to transferring what's already in it — safe to just re-run the exact same command after an interruption, at any stage (mid-scan, mid-transfer, or between the two). Pass `--rescan` to force a fresh scan instead (e.g. you want to pick up new files that have shown up since).
-
-Scanning itself is also resumable at a finer grain even before a manifest exists: Drive per-account scans cache progress under `out/`, and Gmail message metadata is cached and resumed message-by-message — an interrupted scan doesn't restart from zero.
-
-### Transferring automatically
-
-By default (`--folders-per-round 0`), once scanning + selection finishes for the **whole Workspace** (or a manifest is reused per **Resuming** above), the script continues into the **same** destination folder flow as Part 6/8 below — no separate manual step. **Drive goes first, completely, before Gmail starts**: every account's Drive files are copied (largest account first, each landing in a subfolder named after that account — `AI Labs Sample Set (date)/{email}/...`), and only once *all* Drive transfers are done does it move on to Gmail threads (again largest account first). This reuses the exact same checkpointed copy/insert logic as Part 6/8, so an interrupted transfer resumes without re-copying or re-inserting anything already done.
-
-With `--folders-per-round` set to a real batch size, transfer happens **concurrently** with scanning instead of after it — for both Drive and Gmail. In Workspace mode, as soon as one account finishes being scanned and selected, its files/threads are handed to a background transfer worker while the script immediately moves on to scanning the *next* account. In single-account "My Drive + Gmail only" mode there's only one account to scan, so the same idea applies **within** it: as soon as one round (of N folders for Drive, or N messages for Gmail — see `--messages-per-round`) is scanned and selected, that round is handed to a background transfer worker while the script immediately moves on to scanning the *next round* of that same account's remaining folders/mailbox. See **Speeding up huge Workspaces** below for the details and the fairness trade-off that comes with it.
-
-This needs the destination account's own consent the first time — the same OAuth (and, if Gmail threads are included, `gmail.insert`) login described in Parts 3/4/8. If the person running the scan (operator, with the Service Account) is a **different** person from whoever owns the destination account, use `--scan-only` here instead, and have the destination account's owner independently run Part 6/8 as their own separate step — that's the multi-party handoff flow those parts were originally built for, and it still works unchanged.
-
-### Speeding up huge Workspaces (or one huge Drive) with `--folders-per-round`
-
-For an org with hundreds of users each holding tens of thousands of files, waiting for the *entire* Workspace to be scanned and fairly ranked before a single file transfers can simply take too long. Setting `--folders-per-round` switches to a genuinely faster, streaming pipeline, with scanning and transferring happening **concurrently**, not one after the other. It works in both modes, at two different granularities:
-
-**Workspace mode — account by account (Drive), and round by round within each account (Gmail):**
-
-- **Drive uses one shared, running budget — not a per-account slice.** Accounts are scanned in order; each account's selection eats into whatever's left of the overall `--drive-cap-gb`. The moment that budget hits zero, **every remaining account is skipped for Drive entirely** — scanning moves straight on to Gmail rather than working through the rest of the account list regardless of whether the cap is already full. If 5 accounts' worth of files happen to fill the whole cap, accounts 6 onward are never even scanned.
-- Within each account, Drive is scanned in batches of N folders (e.g. `--folders-per-round 1000`), stopping that account early once it already has comfortably more candidates than what's left of the running budget could ever need.
-- Unless `--scan-only` was passed, **hand that account's files to a background transfer worker and immediately move on to scanning the next account** — scanning account N+1 and transferring account N's files happen at the same time, not sequentially. One dedicated worker thread drains the transfer queue in the order accounts finish scanning, so nothing races against itself.
-- Once Drive stops (cap exhausted, or every account scanned) and its transfer queue fully drains, Gmail starts — **still a flat equal share per account** (`--gmail-cap-gb` ÷ number of accounts), not a shared running budget like Drive.
-- **Within each account's own Gmail share**, messages are scanned in batches of `--messages-per-round` (default `2000`) — the same round pattern as Drive, just one level down: each batch is selected and handed to the background transfer worker while scanning continues into that *same account's* next batch of messages, not just overlapping with other accounts.
-
-**Single-account ("My Drive + Gmail only") mode — round by round, for both Drive and Gmail:**
-
-There's only one account, so there's no "next account" to overlap with — instead the same idea applies to successive **rounds** within that one account, for Drive and Gmail independently:
-
-- Drive is scanned in batches of N folders (a "round"). Each round's newly-found files are selected against **one shared running budget across rounds** — the same `--drive-cap-gb`, decremented round by round. The moment that budget hits zero, scanning stops immediately, even if the account's Drive isn't fully walked yet.
-- Unless `--scan-only` was passed, **hand that round's selected files to a background transfer worker and immediately move on to scanning the next round** of the same account's remaining folders — scanning round N+1 and transferring round N's files happen at the same time, not sequentially.
-- Gmail works the same way, batched by `--messages-per-round` messages instead of folders: each batch of messages is scanned, the resulting threads selected against the running `--gmail-cap-gb` budget, and handed off for background transfer while scanning continues into the next batch.
-
-**Gmail's cap is approximate under round-streaming, unlike Drive's.** A Drive file's size is known the instant it's seen, so Drive's cap accounting is always exact. A Gmail thread is different: message IDs aren't returned grouped by thread, so a long-running thread's messages can be scattered across many rounds — by the time a thread looks "done" and gets selected, later rounds can still turn up more of its messages. The transfer itself is unaffected (it always pulls the *complete* thread, so nothing is ever missed on disk), but the byte total charged against `--gmail-cap-gb` at selection time only reflects what had been seen so far — so actual bytes transferred for that thread can run a bit over what was budgeted, bounded by that one thread's own size. In practice this means the Gmail portion can modestly overshoot `--gmail-cap-gb` under round-streaming; it's exact only when `--folders-per-round 0` (the default, whole-mailbox-first mode).
-
-**This is a real trade-off, not just a scanning shortcut**: the priority-by-data-volume and cross-account top-up behavior (Workspace mode) or the size/recency-optimal single-pass selection (single-account mode) described earlier in this section, and Gmail's exact cap enforcement, only apply when `--folders-per-round 0` (the default). With it set, whichever accounts/rounds get scanned first can consume the entire Drive budget, later accounts/folders can end up excluded purely because of scan order, there's no cross-account top-up for native files, and Gmail's cap can be modestly overshot as described above — simpler and much faster, at the cost of that fairness/optimality/precision. Use `0` when you want the thorough, globally-optimal, cap-exact manifest (e.g. building one to hand off via `--scan-only` for someone else to review); use a real batch size when you need results fast and can live with those trade-offs.
-
-### Output
-
-`out/quality_sample_manifest.json`, containing:
-
-- `"files"` — selected Drive files: binary files under the 15GB cap, plus the Sheets/Docs/Slides quotas (same shape Part 6's script already reads)
-- `"gmail_threads"` — selected Gmail threads, each with its `message_ids` (used by Part 8)
-- `"drive_native_selected"` — how many Sheets/Docs/Slides were actually included (useful if a Workspace has fewer than the quota of a given type)
-
-If Part 5 was run **without** `--scan-only`, it already transferred everything by the time it finishes — skip ahead to **Part 7 — Find your output**. Parts 6 and 8 below are for the multi-party handoff case (`--scan-only` was used, or you're working from the bundled default list instead of a fresh scan).
+Output: `out/quality_sample_manifest.json`
 
 ---
 
-## Part 6 — Build the sample set
+## Part 6 — Manual Drive copy (only after `--scan-only`)
 
-**Only needed if Part 5 was run with `--scan-only`, or you're using the bundled default list instead of a fresh Part 5 scan.** If Part 5 already transferred everything for you, skip to Part 7.
-
-Make sure you are in the project folder with `.venv` activated:
+Skip if Part 5 already transferred.
 
 ```
 cd ~/inventory-segmentor
@@ -356,105 +336,87 @@ cd %USERPROFILE%\inventory-segmentor
 .venv\Scripts\activate
 ```
 
-By default this uses the bundled `data/ai_labs_1200_balanced_sample.json`. If an operator ran Part 5 for this engagement, add `--manifest out/quality_sample_manifest.json` to every command below to use that fresh manifest instead.
+Use `--manifest out/quality_sample_manifest.json` if Part 5 built a fresh list. Otherwise the bundled default is `data/ai_labs_1200_balanced_sample.json`.
 
-Note the folder layout differs slightly from Part 5's own automatic transfer: this script groups files by content category (`Uncategorized`, since this manifest has no LLM classification pass); Part 5's built-in transfer groups by account email instead. Same destination folder either way.
-
-### Step A — Preview (no changes to Drive)
+**Preview**
 
 ```
 python tools/export_ai_labs_samples.py --dry-run
 ```
 
-You should see the selected files listed across categories such as:
+With Part 5 manifest:
+```
+python tools/export_ai_labs_samples.py --manifest out/quality_sample_manifest.json --dry-run
+```
 
-- Product & Engineering  
-- Financial & Legal  
-- Operations & HR  
-- Marketing  
-- Strategy & Planning  
-- Customer & Sales  
-- Meeting Notes & Internal Comms  
-- Uncategorized  
-
-### Step B — Smoke test (5 files)
+**Smoke test (5 files)**
 
 ```
 python tools/export_ai_labs_samples.py --limit 5
 ```
 
-1. Browser opens → sign in → **Allow** Drive access.
-2. When it finishes, open [Google Drive](https://drive.google.com) → **My Drive**.
-3. Look for a folder named like **`AI Labs Sample Set (YYYY-MM-DD)`**.
-4. Inside it you should see category folders with a few copied files.
+Or:
+```
+python tools/export_ai_labs_samples.py --manifest out/quality_sample_manifest.json --limit 5
+```
 
-If those 5 look correct, continue.
+Browser → sign in → **Allow**. Check Drive for `AI Labs Sample Set (YYYY-MM-DD)`.
 
-### Step C — Full sample set
+**Full copy**
 
 ```
 python tools/export_ai_labs_samples.py
 ```
 
-This can take a while. It is safe to stop and re-run the **same** command — it resumes from a checkpoint and will not re-copy files it already finished.
+Or:
+```
+python tools/export_ai_labs_samples.py --manifest out/quality_sample_manifest.json
+```
 
-Optional custom folder name:
-
+Custom folder name:
 ```
 python tools/export_ai_labs_samples.py --folder-name "Goldsetu AI Labs Samples"
 ```
 
+Safe to stop and re-run the same command — resumes from checkpoint.
+
 ---
 
-## Part 7 — Find your output
+## Part 7 — Find output
 
-In Google Drive → **My Drive**:
+Google Drive → **My Drive** → folder like `AI Labs Sample Set (YYYY-MM-DD)`
 
-If Part 5 transferred it automatically (subfolders by account):
-
+Part 5 transfer (by account):
 ```
 AI Labs Sample Set (YYYY-MM-DD)/
   alice@yourdomain.com/
   bob@yourdomain.com/
-  ...
 ```
 
-If Part 6 (the separate script) copied it instead (subfolders by category):
-
+Part 6 transfer (by category):
 ```
 AI Labs Sample Set (YYYY-MM-DD)/
   Product & Engineering/
   Financial & Legal/
-  Operations & HR/
-  Marketing/
   ...
 ```
 
-Either way, the script prints a direct link at the end, for example:
-
-```
-their folder: https://drive.google.com/drive/folders/.........
-```
+Script also prints a folder link when done.
 
 ---
 
-## Part 8 — Gmail thread samples (optional)
+## Part 8 — Manual Gmail copy (only after `--scan-only`)
 
-**Only needed if Part 5 was run with `--scan-only`** — otherwise Part 5 already inserted these threads for you. Only relevant if the manifest includes a `"gmail_threads"` list. This copies those threads — **whole threads, never split** — into your own Gmail Inbox, so Gmail re-threads them correctly on arrival.
+Skip if Part 5 already inserted threads. Needs `"gmail_threads"` in the manifest.
 
-### One-time setup: add the `gmail.insert` scope
+### Add `gmail.insert` scope (if not done in Part 3)
 
-If you already checked this box in Part 3, skip ahead to **Copy the threads** below. Otherwise:
+1. Cloud Console → **APIs & Services** → **OAuth consent screen**
+2. Enable **Gmail API** if needed (**Library** → **Gmail API** → **Enable**)
+3. **Edit App** → **Scopes** → add `.../auth/gmail.insert` → save
+4. Confirm your account is under **Test users**
 
-1. [Google Cloud Console](https://console.cloud.google.com/) → your project → **APIs & Services** → **OAuth consent screen**.
-2. If you haven't already, enable the **Gmail API** first — **APIs & Services** → **Library** → search **Gmail API** → **Enable** (scopes for a disabled API won't show up in the next step).
-3. Back on the consent screen: **Edit App** → step through to **Scopes** → **Add or Remove Scopes** → search `gmail.insert` → check `.../auth/gmail.insert` → **Update** → **Save and Continue** through to the end.
-4. If the app is still in **Testing** publish status, also confirm the signing-in Google account is listed under **Test users** on that same screen — add it if it's missing.
-5. This is a new scope, separate from Drive — the **first time** you run the command below, a fresh browser consent prompt appears even if you already authorized Drive access in Part 4.
-
-### Copy the threads
-
-Same shape as Part 6 — dry-run, then a small smoke test, then the full run:
+### Copy threads
 
 ```
 python tools/export_ai_labs_gmail_threads.py --service-account ~/Downloads/service_account.json --dry-run
@@ -468,71 +430,70 @@ python tools/export_ai_labs_gmail_threads.py --service-account ~/Downloads/servi
 python tools/export_ai_labs_gmail_threads.py --service-account ~/Downloads/service_account.json
 ```
 
-1. Browser opens the **first time** you insert → sign in → **Allow**. The token is cached at `.secrets/google_gmail_insert_token.json` so you won't be asked again.
-2. Open Gmail → the selected threads appear in your **Inbox**, correctly threaded.
-3. Safe to stop and re-run — it resumes from `out/ai_labs_gmail_threads.checkpoint.jsonl` and won't re-insert threads it already finished.
+Browser on first insert → **Allow**. Threads land in **Inbox**. Re-run same command to resume.
 
-By default this reads `out/quality_sample_manifest.json` (Part 5's output); pass `--manifest` to point elsewhere.
+Default manifest: `out/quality_sample_manifest.json` (override with `--manifest`).
 
 ---
 
 ## Troubleshooting
 
-| Problem | What to do |
+| Problem | Fix |
 | --- | --- |
-| Browser asks to sign in again | Use the **same** account throughout Parts 3–8 |
-| Many `FAIL` / `404` / `notFound` | Wrong Google account, or files were deleted/moved since the manifest was built |
-| Many `403` / permission errors | Sign in as the account the manifest was built from; confirm you can open those files in Drive normally |
-| Google sign-in blocked with an "app not verified" / "access blocked" error | The signing-in account isn't in the OAuth consent screen's **Test users** list yet (Part 3, step 4) — add it there |
-| `OAuth client secrets not found` | Complete Part 3 (create the OAuth client) and Part 4 (`python setup.py`, Google Drive step), or place the client JSON under `.secrets/google_oauth_client.json` |
-| `sample manifest not found` | Update/pull the latest code so `data/ai_labs_1200_balanced_sample.json` exists, or check the `--manifest` path |
-| Interrupted halfway | Re-run the same command — both `export_ai_labs_samples.py` and `export_ai_labs_gmail_threads.py` resume automatically |
-| Want a fresh destination folder | Delete `out/ai_labs_samples.checkpoint.jsonl` and `out/ai_labs_samples.checkpoint.jsonl.dest.json`, then run again |
-| `build_quality_sample.py`: `--admin-email is required with --service-account` | You passed `--service-account` but not `--admin-email` — add it, or drop `--service-account` entirely to scan just your own Drive + Gmail instead |
-| Manifest has no `gmail_threads` / Part 8 finds nothing | Run Part 5 first (with Gmail not skipped), or point `--manifest` at a manifest that has one |
-| Gmail insert fails with a permissions / consent screen error | `gmail.insert` scope isn't on the OAuth client's consent screen yet — do Part 8's one-time setup, including the Test users check |
-| Part 5 asks for a browser login you weren't expecting | It's transferring automatically now (the default) — that's the destination account's OAuth/`gmail.insert` consent, same as Parts 4/8. Use `--scan-only` if you only want the manifest and don't want to authorize a destination right now |
-| Part 5 didn't re-scan even though you expected it to | `--out` already pointed at an existing manifest, so it reused it — pass `--rescan` to force a fresh scan |
-| Want Part 5 to build a manifest without transferring, for someone else to run Part 6/8 later | Add `--scan-only` |
+| Asked to sign in again | Use the **same** Google account for Parts 3–8 |
+| Many `FAIL` / `404` / `notFound` | Wrong account, or files moved/deleted since manifest |
+| Many `403` | Sign in as the account the manifest was built from |
+| App not verified / access blocked | Add account under OAuth **Test users** (Part 3) |
+| `OAuth client secrets not found` | Finish Parts 3–4, or put JSON at `.secrets/google_oauth_client.json` |
+| `sample manifest not found` | Pull latest code, or fix `--manifest` path |
+| Interrupted | Re-run the **same** command |
+| Fresh destination folder | Delete `out/ai_labs_samples.checkpoint.jsonl` and `out/ai_labs_samples.checkpoint.jsonl.dest.json`, re-run |
+| `--admin-email is required with --service-account` | Add `--admin-email`, or drop `--service-account` for My Drive mode |
+| No `gmail_threads` / Part 8 empty | Re-run Part 5 without `--skip-gmail` |
+| Gmail insert permission error | Add `gmail.insert` scope (Part 8 setup) |
+| Unexpected browser login in Part 5 | Destination OAuth consent (default transfer). Use `--scan-only` to skip |
+| Part 5 didn't re-scan | Manifest already exists — add `--rescan` |
+| Local: `--root not found` | Fix the path to the parent folder |
+| Local: no subfolders | `--root` must contain at least one subfolder |
 
 ---
 
 ## Quick reference
 
 ```
-# (Operator) Build a fresh manifest across the whole Workspace AND transfer it — one run
-python tools/build_quality_sample.py --service-account ~/Downloads/service_account.json --admin-email admin@yourdomain.com
+# Local dump → Desktop (every subfolder under --root)
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
 
-# (Operator) Or just your own Drive + Gmail — no service account needed
+# My Drive only
 python tools/build_quality_sample.py
 
-# Re-run any of the above any time — resumes automatically (scan or transfer, wherever it left off)
+# Whole Workspace + transfer
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com
 
-# Build the manifest only, don't transfer (for a separate person to handle Part 6/8)
-python tools/build_quality_sample.py --service-account ~/Downloads/service_account.json --admin-email admin@yourdomain.com --scan-only
+# Manifest only (handoff)
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --scan-only
 
-# Force a fresh scan even though a manifest already exists
-python tools/build_quality_sample.py --service-account ~/Downloads/service_account.json --admin-email admin@yourdomain.com --rescan
+# Force rescan
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --rescan
 
-# --- Manual handoff path (Parts 6/8) — only needed after --scan-only ---
-
-# Preview the Drive copy
-python tools/export_ai_labs_samples.py --dry-run
-
-# Test with 5 files
-python tools/export_ai_labs_samples.py --limit 5
-
-# Full Drive copy run
-python tools/export_ai_labs_samples.py
-
-# Same, but from a freshly built manifest
+# Manual Drive copy (after --scan-only)
+python tools/export_ai_labs_samples.py --manifest out/quality_sample_manifest.json --dry-run
+python tools/export_ai_labs_samples.py --manifest out/quality_sample_manifest.json --limit 5
 python tools/export_ai_labs_samples.py --manifest out/quality_sample_manifest.json
 
-# Gmail thread copy (needs a manifest with gmail_threads, e.g. from Part 5)
+# Manual Gmail copy (after --scan-only)
 python tools/export_ai_labs_gmail_threads.py --service-account ~/Downloads/service_account.json
 ```
 
-Manifest used:
-
-- Bundled default (no Excel required): `data/ai_labs_1200_balanced_sample.json`
-- Freshly built (Part 5, size-capped, includes Gmail threads): `out/quality_sample_manifest.json`
+Manifests:
+- Bundled default: `data/ai_labs_1200_balanced_sample.json`
+- Fresh from Part 5 (Drive): `out/quality_sample_manifest.json`
+- Fresh from local dump: `out/quality_sample_local_manifest.json`
