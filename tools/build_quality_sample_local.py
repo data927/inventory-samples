@@ -173,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
         total_ok += ok
         total_fail += fail
         _log(f"({i}/{len(subfolders)}) {folder.name}: copied {ok}/{len(files)}"
+             + (f" (folder had only {len(files)})" if len(files) < args.limit else "")
              + (f" fail={fail}" if fail else ""))
         for src in files:
             rel = src.relative_to(folder).as_posix()

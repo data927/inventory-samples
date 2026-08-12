@@ -17,7 +17,9 @@ company-dump/
   anything-else/
 ```
 
-From each subfolder it takes the **first 1000 files** (whatever comes first — no size ranking) and copies them to your **Desktop**, keeping the same subfolder names:
+From each subfolder it takes up to the **first 1000 files** (whatever comes first — no size ranking). If a subfolder has fewer than 1000 files, **all of them** are copied.
+
+Copies land on your **Desktop**, keeping the same subfolder names:
 
 ```
 Desktop/AI Labs Sample Set (YYYY-MM-DD)/
