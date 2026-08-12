@@ -12,11 +12,12 @@ from typing import Any
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
-# Mid-stream network failures (dead socket, VPN/AV interference) — retryable like
-# transient HttpErrors, but httplib2 doesn't recover the underlying connection on
-# its own, so callers must also drop pooled sockets before retrying (see
-# _reset_http_connections).
-_RETRYABLE_NETWORK_ERRORS = (ssl.SSLError, ConnectionResetError, BrokenPipeError)
+# Mid-stream network failures (dead socket, VPN/AV interference, read timeout) —
+# retryable like transient HttpErrors, but httplib2 doesn't recover the underlying
+# connection on its own, so callers must also drop pooled sockets before retrying
+# (see _reset_http_connections). ConnectionError covers Reset/BrokenPipe/Aborted/Refused;
+# TimeoutError covers stalled reads (aliased to socket.timeout since Python 3.10).
+_RETRYABLE_NETWORK_ERRORS = (ssl.SSLError, ConnectionError, TimeoutError)
 
 # Native Google files: export MIME (not get_media).
 _GOOGLE_EXPORT_MIME: dict[str, str] = {

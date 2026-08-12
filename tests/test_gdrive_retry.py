@@ -48,6 +48,15 @@ class TestCallWithRetry(unittest.TestCase):
 
         self.assertEqual(result, "ok")
 
+    def test_retries_on_timeout_error(self) -> None:
+        service = MagicMock()
+        flaky = _FlakyExecute("ok", TimeoutError("The read operation timed out"))
+
+        with patch("gdrive.fetch._sleep_backoff_network"):
+            result = call_with_retry(service, flaky.execute)
+
+        self.assertEqual(result, "ok")
+
     def test_raises_after_exhausting_retries(self) -> None:
         service = MagicMock()
 
