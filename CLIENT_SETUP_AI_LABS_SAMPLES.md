@@ -261,10 +261,12 @@ python tools/build_quality_sample.py --as-is --cap-gb 10
 6. [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste Client ID + scopes:
 
 ```
-https://www.googleapis.com/auth/drive.readonly,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
 ```
 
 → **Authorise**. Wait 5–10 min if first run fails with `unauthorized_client`.
+
+Use the full `drive` scope (not only `drive.readonly`) so `--full-account` / `--as-is` can create the sample folder in the **super-admin** My Drive and copy via Domain-Wide Delegation with **no personal OAuth browser login**.
 
 **Operator — save credentials**
 
@@ -284,7 +286,7 @@ python tools/build_quality_sample.py \
 
 **Run — one account, entire My Drive (transfer only, no quality scan)**
 
-Creates `AI Labs Sample Set (date)` and starts copying **as soon as the script begins** (walk and transfer overlap). Copies **everything** from that user's My Drive. No 15GB/12.5GB caps, no Gmail.
+Uses **Domain-Wide Delegation only** (service account + super-admin). Creates `AI Labs Sample Set (date)` in the **admin** My Drive and starts copying immediately. No personal OAuth login, no Gmail.
 
 ```
 python tools/build_quality_sample.py \
@@ -296,15 +298,7 @@ python tools/build_quality_sample.py \
 
 **Run — one account, as-is until 10GB (no quality scan)**
 
-Walk order as-is, transfer starts immediately, stops once **10GB** is fulfilled. No Gmail.
-
-```
-python tools/build_quality_sample.py \
-  --service-account ~/Downloads/service_account.json \
-  --admin-email admin@yourdomain.com \
-  --users alice@yourdomain.com \
-  --as-is
-```
+Same DWD path; walk order as-is; stops at **10GB**. Folder lands in the **admin** My Drive.
 
 ```
 python tools/build_quality_sample.py \

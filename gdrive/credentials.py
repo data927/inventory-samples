@@ -16,6 +16,8 @@ from googleapiclient.discovery import build
 # Least privilege for listing tree; use drive.readonly if you need file download later.
 SCOPES_METADATA = ("https://www.googleapis.com/auth/drive.metadata.readonly",)
 SCOPES_READONLY = ("https://www.googleapis.com/auth/drive.readonly",)
+# Full Drive (read+write) — needed for Domain-Wide Delegation copies into a dest folder.
+SCOPES_DRIVE = ("https://www.googleapis.com/auth/drive",)
 SCOPES_ADMIN_USERS = ("https://www.googleapis.com/auth/admin.directory.user.readonly",)
 SCOPES_GMAIL = ("https://www.googleapis.com/auth/gmail.readonly",)
 SCOPES_GMAIL_INSERT = ("https://www.googleapis.com/auth/gmail.insert",)

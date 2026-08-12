@@ -75,6 +75,7 @@ from googleapiclient.errors import HttpError
 
 from gdrive.credentials import (
     SCOPES_ADMIN_USERS,
+    SCOPES_DRIVE,
     SCOPES_GMAIL,
     SCOPES_READONLY,
     build_admin_service,
@@ -1144,6 +1145,27 @@ def _take_files_as_is_until_cap(
     return taken, used, cap_full
 
 
+def _share_folder_writer(service, folder_id: str, email: str, progress_log=_log) -> None:
+    """Grant ``email`` writer on ``folder_id`` (idempotent if already shared)."""
+    try:
+        service.permissions().create(
+            fileId=folder_id,
+            body={"type": "user", "role": "writer", "emailAddress": email},
+            sendNotificationEmail=False,
+            supportsAllDrives=True,
+            fields="id",
+        ).execute()
+        progress_log(f"[as-is] shared dest folder with {email} (writer)")
+    except HttpError as exc:
+        # 403/409 often means the permission already exists — fine to continue.
+        status = getattr(exc, "resp", None)
+        code = getattr(status, "status", None) if status is not None else None
+        if code in (400, 403, 409):
+            progress_log(f"[as-is] share {email}: already allowed or skipped ({code})")
+            return
+        raise
+
+
 def run_full_account_drive_transfer(
     source_service,
     email: str,
@@ -1154,6 +1176,9 @@ def run_full_account_drive_transfer(
     modified_before: str | None = None,
     folders_per_round: int = 50,
     cap_bytes: int | None = None,
+    dest_owner_service=None,
+    copy_service=None,
+    share_dest_with: str | None = None,
     progress_log=_log,
 ) -> list[dict[str, Any]]:
     """Walk one account's My Drive and copy files as-is into AI Labs Sample Set.
@@ -1162,9 +1187,15 @@ def run_full_account_drive_transfer(
     worker copies that batch while the walk continues. No quality selection, no Gmail.
     If ``cap_bytes`` is set, keep taking walk-order files until that many bytes are
     queued (skipping ones that do not fit), then stop. Resumable via checkpoint.
+
+    Domain-Wide Delegation (workspace): pass ``dest_owner_service`` as the super-admin
+    Drive client (creates the sample folder in admin My Drive), ``copy_service`` as the
+    selected user (can read their files and write into the shared dest), and
+    ``share_dest_with=email``. No personal OAuth browser login is required.
     """
     ckpt = checkpoint_dir / "ai_labs_samples.checkpoint.jsonl"
-    dest_service = build_drive_service(_get_rw_credentials())
+    owner_svc = dest_owner_service or build_drive_service(_get_rw_credentials())
+    writer_svc = copy_service or owner_svc
     dest_meta = _load_dest_meta(ckpt)
     if dest_folder_id.strip():
         dest_id = normalize_folder_id(dest_folder_id)
@@ -1177,9 +1208,12 @@ def run_full_account_drive_transfer(
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if folder_name == "AI Labs Sample Set":
             folder_name = f"{folder_name} ({stamp})"
-        dest_id = _create_root_folder(dest_service, folder_name, parent_id="root")
+        dest_id = _create_root_folder(owner_svc, folder_name, parent_id="root")
         progress_log(f"[as-is] created My Drive folder {folder_name!r} → {dest_id}")
     _save_dest_meta(ckpt, dest_id, folder_name)
+
+    if share_dest_with:
+        _share_folder_writer(owner_svc, dest_id, share_dest_with, progress_log=progress_log)
 
     done = _load_done(ckpt)
     folder_cache: dict[str, str] = {}
@@ -1191,7 +1225,7 @@ def run_full_account_drive_transfer(
     accounted: set[str] = set()
 
     def _transfer_worker() -> None:
-        # Only this thread touches dest_service / done / folder_cache / all_transferred.
+        # Only this thread touches writer_svc / done / folder_cache / all_transferred.
         while True:
             item = work_queue.get()
             if item is None:
@@ -1206,8 +1240,8 @@ def run_full_account_drive_transfer(
                     skip += 1
                     continue
                 try:
-                    parent = _ensure_child_folder(dest_service, dest_id, email, folder_cache)
-                    new_id = _drive_copy(dest_service, fid, parent, row["name"])
+                    parent = _ensure_child_folder(writer_svc, dest_id, email, folder_cache)
+                    new_id = _drive_copy(writer_svc, fid, parent, row["name"])
                     _append_done(ckpt, {
                         "file_id": fid, "new_id": new_id, "bucket": email,
                         "name": row["name"], "path": row["path"],
@@ -1236,8 +1270,9 @@ def run_full_account_drive_transfer(
         cap_note = "no byte cap (entire account)"
     else:
         cap_note = f"cap {cap_bytes / GB:.2f}GB, walk order as-is"
+    auth_note = "DWD (admin dest + user copy)" if share_dest_with else "OAuth dest"
     progress_log(f"[as-is] transferring My Drive for {email} → {folder_name!r} "
-                 f"(starts immediately; {cap_note}; Drive only; {budget} folders/round)")
+                 f"(starts immediately; {cap_note}; {auth_note}; Drive only; {budget} folders/round)")
 
     frontier = None
     round_num = 0
@@ -1624,8 +1659,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"ERROR: --{mode_label} in workspace mode requires exactly one --users EMAIL", flush=True)
                 return 1
             email = selected_users[0]
-            creds = get_service_account_credentials(sa_file, email, SCOPES_READONLY)
-            source_svc = build_drive_service(creds)
+            # Domain-Wide Delegation only: admin owns the sample folder; selected user
+            # lists + copies (no personal OAuth browser login).
+            admin_creds = get_service_account_credentials(sa_file, admin_email, SCOPES_DRIVE)
+            user_creds = get_service_account_credentials(sa_file, email, SCOPES_DRIVE)
+            admin_svc = build_drive_service(admin_creds)
+            source_svc = build_drive_service(user_creds)
+            dest_owner_service = admin_svc
+            copy_service = source_svc
+            share_dest_with = email
+            _log(f"[mode] DWD: dest folder in {admin_email} My Drive; copy as {email}")
         else:
             if selected_users:
                 print("ERROR: --users requires --service-account (Domain-Wide Delegation)", flush=True)
@@ -1637,6 +1680,9 @@ def main(argv: list[str] | None = None) -> int:
                 email = (about.get("user") or {}).get("emailAddress") or "me"
             except HttpError:
                 email = "me"
+            dest_owner_service = None
+            copy_service = None
+            share_dest_with = None
 
         if args.full_account:
             cap_bytes = int(args.cap_gb * GB) if args.cap_gb is not None else None
@@ -1656,7 +1702,9 @@ def main(argv: list[str] | None = None) -> int:
             source_svc, email,
             folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,
             checkpoint_dir=scan_cache_dir, modified_before=drive_before,
-            folders_per_round=folders_per_round, cap_bytes=cap_bytes, progress_log=_log,
+            folders_per_round=folders_per_round, cap_bytes=cap_bytes,
+            dest_owner_service=dest_owner_service, copy_service=copy_service,
+            share_dest_with=share_dest_with, progress_log=_log,
         )
         total_bytes = sum(r.get("size_bytes") or 0 for r in transferred)
         manifest = {
