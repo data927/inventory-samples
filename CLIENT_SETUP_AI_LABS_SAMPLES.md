@@ -98,7 +98,7 @@ Point at any parent folder. **Every immediate subfolder** is processed — names
   ...
 ```
 
-Skips Parts 3–8. Copies the **first 1000 files** in each subfolder onto the **Desktop**.
+Skips Parts 3–8. Copies up to **1000 files per subfolder** under a **15GB** overall cap (split equally across subfolders) onto the **Desktop**.
 
 Full local-only guide: `CLIENT_SETUP_AI_LABS_SAMPLES_LOCAL.docx`
 
@@ -127,8 +127,11 @@ Desktop/AI Labs Sample Set (YYYY-MM-DD)/
 **Useful variants**
 
 ```
-# Different per-folder limit
+# Different per-folder file limit
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --limit 1000
+
+# Different overall byte cap (default 15GB)
+python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --cap-gb 15
 
 # Specific subfolders only
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump --only "Folder A" "Folder B"
