@@ -9,9 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from googleapiclient.errors import HttpError
-
-from gdrive.fetch import _RETRYABLE_NETWORK_ERRORS, _reset_http_connections, _sleep_backoff, _sleep_backoff_network
+from gdrive.fetch import call_with_retry
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -52,31 +50,23 @@ def _list_children(service, folder_id: str, *, max_retries: int = 8) -> list[dic
     out: list[dict[str, Any]] = []
     page_token: str | None = None
     while True:
-        for attempt in range(max_retries + 1):
-            try:
-                resp = (
-                    service.files()
-                    .list(
-                        q=q,
-                        pageSize=200,
-                        fields=_LIST_FIELDS,
-                        pageToken=page_token,
-                        corpora="allDrives",
-                        supportsAllDrives=True,
-                        includeItemsFromAllDrives=True,
-                    )
-                    .execute()
+        resp = call_with_retry(
+            service,
+            lambda pt=page_token: (
+                service.files()
+                .list(
+                    q=q,
+                    pageSize=200,
+                    fields=_LIST_FIELDS,
+                    pageToken=pt,
+                    corpora="allDrives",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
                 )
-                break
-            except HttpError as e:
-                if attempt >= max_retries or e.resp.status not in (403, 429, 500, 503):
-                    raise
-                _sleep_backoff(attempt, e)
-            except _RETRYABLE_NETWORK_ERRORS:
-                if attempt >= max_retries:
-                    raise
-                _reset_http_connections(service)
-                _sleep_backoff_network(attempt)
+                .execute()
+            ),
+            max_retries=max_retries,
+        )
         out.extend(resp.get("files") or [])
         page_token = resp.get("nextPageToken")
         if not page_token:
@@ -316,15 +306,18 @@ def list_shared_drives(service, *, use_domain_admin_access: bool = False) -> lis
     drives: list[dict[str, Any]] = []
     page_token: str | None = None
     while True:
-        resp = (
-            service.drives()
-            .list(
-                pageSize=100,
-                fields="nextPageToken, drives(id, name)",
-                pageToken=page_token,
-                useDomainAdminAccess=use_domain_admin_access,
-            )
-            .execute()
+        resp = call_with_retry(
+            service,
+            lambda pt=page_token: (
+                service.drives()
+                .list(
+                    pageSize=100,
+                    fields="nextPageToken, drives(id, name)",
+                    pageToken=pt,
+                    useDomainAdminAccess=use_domain_admin_access,
+                )
+                .execute()
+            ),
         )
         drives.extend(resp.get("drives") or [])
         page_token = resp.get("nextPageToken")
@@ -342,16 +335,19 @@ def list_workspace_users(admin_service) -> list[str]:
     emails: list[str] = []
     page_token: str | None = None
     while True:
-        resp = (
-            admin_service.users()
-            .list(
-                customer="my_customer",
-                maxResults=500,
-                pageToken=page_token,
-                fields="nextPageToken,users(primaryEmail,suspended)",
-                orderBy="email",
-            )
-            .execute()
+        resp = call_with_retry(
+            admin_service,
+            lambda pt=page_token: (
+                admin_service.users()
+                .list(
+                    customer="my_customer",
+                    maxResults=500,
+                    pageToken=pt,
+                    fields="nextPageToken,users(primaryEmail,suspended)",
+                    orderBy="email",
+                )
+                .execute()
+            ),
         )
         for u in resp.get("users") or []:
             if not u.get("suspended"):

@@ -106,6 +106,27 @@ def _reset_http_connections(service: Any) -> None:
         connections.clear()
 
 
+def call_with_retry(service: Any, request_fn, *, max_retries: int = 8):
+    """Call ``request_fn()`` (a zero-arg closure ending in ``.execute()``), retrying
+    transient ``HttpError``s (403/429/500/503) and mid-stream SSL/connection failures.
+
+    Single choke point for every one-shot Drive API call — every ``.execute()`` call
+    in this codebase should go through here instead of re-implementing its own retry loop.
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            return request_fn()
+        except HttpError as e:
+            if attempt >= max_retries or e.resp.status not in (403, 429, 500, 503):
+                raise
+            _sleep_backoff(attempt, e)
+        except _RETRYABLE_NETWORK_ERRORS:
+            if attempt >= max_retries:
+                raise
+            _reset_http_connections(service)
+            _sleep_backoff_network(attempt)
+
+
 def _suffix_for_export(export_mime: str, display_name: str) -> str:
     ext = Path(display_name).suffix.lower()
     if export_mime == "text/plain":
@@ -238,14 +259,17 @@ def fetch_drive_file_to_path(
 def resolve_shortcut_target(service: Any, target_id: str) -> dict[str, Any] | None:
     """Return files().get fields for shortcut target, or None."""
     try:
-        return (
-            service.files()
-            .get(
-                fileId=target_id,
-                fields="id,name,mimeType,size,modifiedTime,webViewLink",
-                supportsAllDrives=True,
-            )
-            .execute()
+        return call_with_retry(
+            service,
+            lambda: (
+                service.files()
+                .get(
+                    fileId=target_id,
+                    fields="id,name,mimeType,size,modifiedTime,webViewLink",
+                    supportsAllDrives=True,
+                )
+                .execute()
+            ),
         )
-    except HttpError:
+    except (HttpError, *_RETRYABLE_NETWORK_ERRORS):
         return None

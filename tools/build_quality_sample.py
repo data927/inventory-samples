@@ -87,6 +87,7 @@ from gdrive.credentials import (
     get_credentials,
     get_service_account_credentials,
 )
+from gdrive.fetch import _RETRYABLE_NETWORK_ERRORS, call_with_retry
 from gdrive.scan import (
     list_shared_drives,
     list_workspace_users,
@@ -1154,16 +1155,19 @@ def _share_folder_writer(service, folder_id: str, email: str, progress_log=_log)
     try:
         page_token = None
         while True:
-            resp = (
-                service.permissions()
-                .list(
-                    fileId=folder_id,
-                    fields="nextPageToken,permissions(id,emailAddress,role,type)",
-                    supportsAllDrives=True,
-                    pageToken=page_token,
-                    pageSize=100,
-                )
-                .execute()
+            resp = call_with_retry(
+                service,
+                lambda pt=page_token: (
+                    service.permissions()
+                    .list(
+                        fileId=folder_id,
+                        fields="nextPageToken,permissions(id,emailAddress,role,type)",
+                        supportsAllDrives=True,
+                        pageToken=pt,
+                        pageSize=100,
+                    )
+                    .execute()
+                ),
             )
             for perm in resp.get("permissions") or []:
                 if (perm.get("emailAddress") or "").strip().lower() != want:
@@ -1178,13 +1182,16 @@ def _share_folder_writer(service, folder_id: str, email: str, progress_log=_log)
         progress_log(f"[as-is] WARNING: could not list permissions before share ({exc})")
 
     try:
-        service.permissions().create(
-            fileId=folder_id,
-            body={"type": "user", "role": "writer", "emailAddress": email},
-            sendNotificationEmail=False,
-            supportsAllDrives=True,
-            fields="id,role,emailAddress",
-        ).execute()
+        call_with_retry(
+            service,
+            lambda: service.permissions().create(
+                fileId=folder_id,
+                body={"type": "user", "role": "writer", "emailAddress": email},
+                sendNotificationEmail=False,
+                supportsAllDrives=True,
+                fields="id,role,emailAddress",
+            ).execute(),
+        )
         progress_log(f"[as-is] shared dest folder with {email} (writer) — they can open it in Drive")
     except HttpError as exc:
         status = getattr(exc, "resp", None)
@@ -1725,9 +1732,11 @@ def main(argv: list[str] | None = None) -> int:
             source_svc = my_drive_service()
             # Resolve the signed-in account email for the dest subfolder name.
             try:
-                about = source_svc.about().get(fields="user(emailAddress)").execute()
+                about = call_with_retry(
+                    source_svc, lambda: source_svc.about().get(fields="user(emailAddress)").execute()
+                )
                 email = (about.get("user") or {}).get("emailAddress") or "me"
-            except HttpError:
+            except (HttpError, *_RETRYABLE_NETWORK_ERRORS):
                 email = "me"
             dest_owner_service = None
             copy_service = None

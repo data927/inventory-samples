@@ -37,7 +37,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from gdrive.credentials import build_drive_service, default_client_secrets_path
-from gdrive.fetch import fetch_drive_file_to_path, suggested_local_suffix
+from gdrive.fetch import call_with_retry, fetch_drive_file_to_path, suggested_local_suffix
 from gdrive.scan import FOLDER_MIME, normalize_folder_id
 
 _SCOPES_RW = ("https://www.googleapis.com/auth/drive",)
@@ -144,25 +144,31 @@ def _ensure_child_folder(service, parent_id: str, name: str, cache: dict[str, st
         f"'{parent_id}' in parents and name = '{safe}' "
         f"and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     )
-    resp = (
-        service.files()
-        .list(
-            q=q, spaces="drive", fields="files(id,name)", pageSize=10,
-            supportsAllDrives=True, includeItemsFromAllDrives=True,
-        )
-        .execute()
+    resp = call_with_retry(
+        service,
+        lambda: (
+            service.files()
+            .list(
+                q=q, spaces="drive", fields="files(id,name)", pageSize=10,
+                supportsAllDrives=True, includeItemsFromAllDrives=True,
+            )
+            .execute()
+        ),
     )
     files = resp.get("files") or []
     if files:
         cache[name] = files[0]["id"]
         return cache[name]
-    created = (
-        service.files()
-        .create(
-            body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
-            fields="id", supportsAllDrives=True,
-        )
-        .execute()
+    created = call_with_retry(
+        service,
+        lambda: (
+            service.files()
+            .create(
+                body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
+                fields="id", supportsAllDrives=True,
+            )
+            .execute()
+        ),
     )
     cache[name] = created["id"]
     _log(f"created folder {name!r} → {cache[name]}")
@@ -170,13 +176,16 @@ def _ensure_child_folder(service, parent_id: str, name: str, cache: dict[str, st
 
 
 def _create_root_folder(service, name: str, parent_id: str = "root") -> str:
-    created = (
-        service.files()
-        .create(
-            body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
-            fields="id", supportsAllDrives=True,
-        )
-        .execute()
+    created = call_with_retry(
+        service,
+        lambda: (
+            service.files()
+            .create(
+                body={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
+                fields="id", supportsAllDrives=True,
+            )
+            .execute()
+        ),
     )
     return created["id"]
 
@@ -208,16 +217,20 @@ def _save_dest_meta(path: Path, dest_id: str, folder_name: str) -> None:
     )
 
 
-def _drive_copy(service, file_id: str, dest_parent: str, name: str) -> str:
-    copied = (
-        service.files()
-        .copy(
-            fileId=file_id,
-            body={"name": name, "parents": [dest_parent]},
-            fields="id",
-            supportsAllDrives=True,
-        )
-        .execute()
+def _drive_copy(service, file_id: str, dest_parent: str, name: str, *, max_retries: int = 8) -> str:
+    copied = call_with_retry(
+        service,
+        lambda: (
+            service.files()
+            .copy(
+                fileId=file_id,
+                body={"name": name, "parents": [dest_parent]},
+                fields="id",
+                supportsAllDrives=True,
+            )
+            .execute()
+        ),
+        max_retries=max_retries,
     )
     return copied["id"]
 
@@ -239,13 +252,16 @@ def _materialize_upload(service, meta: dict, dest_parent: str, tmp_dir: Path) ->
         mimetype=None if mime.startswith("application/vnd.google-apps") else mime,
         resumable=True,
     )
-    created = (
-        service.files()
-        .create(
-            body={"name": upload_name, "parents": [dest_parent]},
-            media_body=media, fields="id", supportsAllDrives=True,
-        )
-        .execute()
+    created = call_with_retry(
+        service,
+        lambda: (
+            service.files()
+            .create(
+                body={"name": upload_name, "parents": [dest_parent]},
+                media_body=media, fields="id", supportsAllDrives=True,
+            )
+            .execute()
+        ),
     )
     try:
         local.unlink(missing_ok=True)
@@ -351,10 +367,13 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 parent = _ensure_child_folder(service, dest_id, row["bucket"], folder_cache)
                 if args.materialize:
-                    meta = (
-                        service.files()
-                        .get(fileId=fid, fields="id,name,mimeType,size", supportsAllDrives=True)
-                        .execute()
+                    meta = call_with_retry(
+                        service,
+                        lambda: (
+                            service.files()
+                            .get(fileId=fid, fields="id,name,mimeType,size", supportsAllDrives=True)
+                            .execute()
+                        ),
                     )
                     new_id = _materialize_upload(service, meta, parent, tmp_dir)
                     mode = "upload"
