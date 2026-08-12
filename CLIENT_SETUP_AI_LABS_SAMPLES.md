@@ -38,11 +38,11 @@ cd ~
 ```
 
 ```
-git clone https://github.com/data927/inventory-segmentor.git
+git clone https://github.com/data927/inventory-samples.git
 ```
 
 ```
-cd inventory-segmentor
+cd inventory-samples
 ```
 
 ```
@@ -400,13 +400,13 @@ Output: `out/quality_sample_manifest.json`
 Skip if Part 5 already transferred.
 
 ```
-cd ~/inventory-segmentor
+cd ~/inventory-samples
 source .venv/bin/activate
 ```
 
 Windows:
 ```
-cd %USERPROFILE%\inventory-segmentor
+cd %USERPROFILE%\inventory-samples
 .venv\Scripts\activate
 ```
 
