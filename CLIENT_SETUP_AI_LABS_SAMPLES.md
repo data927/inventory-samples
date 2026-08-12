@@ -171,16 +171,16 @@ python setup.py
 
 Either way, the manifest is built using these selection rules:
 
-- **Binary files** (PDFs, Office docs, images, etc.) — largest first (size is used as a quality proxy; there's no LLM scoring pass) until the **~75GB** Drive cap is hit.
+- **Binary files** (PDFs, Office docs, images, etc.) — largest first (size is used as a quality proxy; there's no LLM scoring pass) until the **~15GB** Drive cap is hit.
 - **Gmail threads** — largest first, until the **~10–15GB** cap (default 12.5GB) is hit. Grouped into **whole threads** before selection — a thread is included or skipped as one unit, so a thread never gets split across the include/exclude line.
-- **Google-native Docs/Sheets/Slides** — these have no fixed byte size, so they can't be size-ranked. Instead each type gets its own fixed count, most-recently-modified first, **on top of** (not counted against) the 75GB Drive cap:
+- **Google-native Docs/Sheets/Slides** — these have no fixed byte size, so they can't be size-ranked. Instead each type gets its own fixed count, most-recently-modified first, **on top of** (not counted against) the 15GB Drive cap:
   - **Google Sheets:** 350
   - **Google Docs:** 300
   - **Google Slides:** 150
 
 **In Workspace mode specifically**, every rule above is applied *per account* first, so one account can't crowd out everyone else — but Drive and Gmail use different fairness strategies:
 
-- **Binary files (Drive):** every account is guaranteed a small minimal slice of the 75GB cap first — no account with data is ever fully shut out, even if its files are large and don't neatly fit a proportional share. Whatever's left of the cap is then filled in **priority order** (accounts with more data going first each round) until the cap is used up. In the typical case this means bigger accounts end up with proportionally more; in rare cases (very few accounts, or a cap barely bigger than one account's smallest file) the guarantee can cost a big account a bit of its edge — that trade-off is intentional so nobody gets zero.
+- **Binary files (Drive):** every account is guaranteed a small minimal slice of the 15GB cap first — no account with data is ever fully shut out, even if its files are large and don't neatly fit a proportional share. Whatever's left of the cap is then filled in **priority order** (accounts with more data going first each round) until the cap is used up. In the typical case this means bigger accounts end up with proportionally more; in rare cases (very few accounts, or a cap barely bigger than one account's smallest file) the guarantee can cost a big account a bit of its edge — that trade-off is intentional so nobody gets zero.
 - **Gmail threads:** the 12.5GB cap is split **equally** across accounts (not weighted by how much data each account has) — every account gets the same nominal share. If a share can't be filled exactly (an account's threads don't fit its slice evenly), the leftover is reclaimed and reused so the full cap still gets used — this can let an account end up with a bit more than its nominal equal share, the same full-utilization trade-off as Drive's guarantee.
 - **Native Sheets/Docs/Slides:** every account is guaranteed its own baseline first (most-recently-modified) — **30 Sheets, 40 Docs, 20 Slides per account** by default. If that guaranteed total is still under the overall target (350/300/150), the remainder is topped up with the next most-recently-modified files from anywhere in the Workspace. The per-account guarantee is never trimmed back down, so with enough accounts the final total can end up above the overall target — that's expected.
 
@@ -268,7 +268,7 @@ This can take a while for a large Workspace — it caches scan progress under `o
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--drive-cap-gb` | `75` | Byte cap for binary Drive files, in GB (split across accounts by data volume in Workspace mode) |
+| `--drive-cap-gb` | `15` | Byte cap for binary Drive files, in GB (split across accounts by data volume in Workspace mode) |
 | `--gmail-cap-gb` | `12.5` | Gmail selection cap, in GB (same per-account split) |
 | `--gsheets-limit` | `350` | Overall target total for Google Sheets, most-recently-modified first |
 | `--gdocs-limit` | `300` | Overall target total for Google Docs |
@@ -282,7 +282,7 @@ This can take a while for a large Workspace — it caches scan progress under `o
 | `--skip-drive` | off | Skip Drive scanning entirely |
 | `--skip-gmail` | off | Skip Gmail scanning entirely |
 | `--users` | (whole domain) | Workspace mode only: scan just these accounts instead of everyone — space- or comma-separated emails, e.g. `--users a@co.com b@co.com`. Skips Admin SDK enumeration entirely, so it doesn't even need the Admin SDK API/scope. |
-| `--folders-per-round` | `0` (off) | Scan each account's Drive in batches of N folders, stopping that account early once it already has enough candidates for the configured targets — see below. `0` disables this and scans every folder exhaustively (the default). |
+| `--folders-per-round` | `0` (off) | Workspace mode only. `0` (default): thorough global mode — scan everyone, then select fairly across all accounts, then transfer. A number > `0`: fast streaming mode — scan/select/transfer **one account at a time**, in batches of N folders, flat equal cap share per account, no cross-account fairness — see below. |
 | `--rescan` | off | Force a fresh scan even if `--out` already exists — see **Resuming** below. |
 | `--scan-only` | off | Stop after writing the manifest — don't transfer into the destination folder (transferring is the default now — see **Transferring automatically** below). |
 | `--folder-name` | `AI Labs Sample Set` | Destination My Drive folder name (date suffix added automatically) |
@@ -296,25 +296,28 @@ Scanning itself is also resumable at a finer grain even before a manifest exists
 
 ### Transferring automatically
 
-By default, once scanning + selection finishes (or a manifest is reused per **Resuming** above), the script immediately continues into the **same** destination folder flow as Part 6/8 below — no separate manual step. **Drive goes first, completely, before Gmail starts**: every account's Drive files are copied (largest account first, each landing in a subfolder named after that account — `AI Labs Sample Set (date)/{email}/...`), and only once *all* Drive transfers are done does it move on to Gmail threads (again largest account first). That way your Drive samples are fully ready as an early, complete checkpoint, rather than Drive and Gmail interleaving account-by-account. This reuses the exact same checkpointed copy/insert logic as Part 6/8, so an interrupted transfer resumes without re-copying or re-inserting anything already done.
+By default (`--folders-per-round 0`), once scanning + selection finishes for the **whole Workspace** (or a manifest is reused per **Resuming** above), the script continues into the **same** destination folder flow as Part 6/8 below — no separate manual step. **Drive goes first, completely, before Gmail starts**: every account's Drive files are copied (largest account first, each landing in a subfolder named after that account — `AI Labs Sample Set (date)/{email}/...`), and only once *all* Drive transfers are done does it move on to Gmail threads (again largest account first). This reuses the exact same checkpointed copy/insert logic as Part 6/8, so an interrupted transfer resumes without re-copying or re-inserting anything already done.
+
+With `--folders-per-round` set to a real batch size, transfer happens **concurrently** with scanning instead of after it — as soon as one account finishes being scanned and selected, its files are handed to a background transfer worker while the script immediately moves on to scanning the *next* account. See **Speeding up huge Workspaces** below for the details and the fairness trade-off that comes with it.
 
 This needs the destination account's own consent the first time — the same OAuth (and, if Gmail threads are included, `gmail.insert`) login described in Parts 3/4/8. If the person running the scan (operator, with the Service Account) is a **different** person from whoever owns the destination account, use `--scan-only` here instead, and have the destination account's owner independently run Part 6/8 as their own separate step — that's the multi-party handoff flow those parts were originally built for, and it still works unchanged.
 
 ### Speeding up huge Workspaces with `--folders-per-round`
 
-For an org with hundreds of users each holding tens of thousands of files, scanning every folder in every account before selecting anything can take a long time with no usable output until it's completely done. `--folders-per-round` changes the strategy, **per account**:
+For an org with hundreds of users each holding tens of thousands of files, waiting for the *entire* Workspace to be scanned and fairly ranked before a single file transfers can simply take too long. Setting `--folders-per-round` (Workspace mode only) switches to a genuinely faster, streaming pipeline — **account by account**, with scanning and transferring happening **concurrently**, not one after the other:
 
-- Scan that account's Drive in batches of N folders (e.g. `--folders-per-round 1000`).
-- After each batch, check whether the account already has comfortably more candidates than the configured targets could ever need (3× the per-account Sheets/Docs/Slides guarantees, and binary candidates already totaling more than the whole `--drive-cap-gb` cap on their own).
-- If so, stop scanning that account and move to the next one — any folders not yet reached are simply skipped for that account.
+- **Drive uses one shared, running budget — not a per-account slice.** Accounts are scanned in order; each account's selection eats into whatever's left of the overall `--drive-cap-gb`. The moment that budget hits zero, **every remaining account is skipped for Drive entirely** — scanning moves straight on to Gmail rather than working through the rest of the account list regardless of whether the cap is already full. If 5 accounts' worth of files happen to fill the whole cap, accounts 6 onward are never even scanned.
+- Within each account, Drive is scanned in batches of N folders (e.g. `--folders-per-round 1000`), stopping that account early once it already has comfortably more candidates than what's left of the running budget could ever need.
+- Unless `--scan-only` was passed, **hand that account's files to a background transfer worker and immediately move on to scanning the next account** — scanning account N+1 and transferring account N's files happen at the same time, not sequentially. One dedicated worker thread drains the transfer queue in the order accounts finish scanning, so nothing races against itself.
+- Once Drive stops (cap exhausted, or every account scanned) and its transfer queue fully drains, Gmail starts — **still a flat equal share per account** (`--gmail-cap-gb` ÷ number of accounts), not a shared running budget like Drive.
 
-This trades a small chance of missing a marginally-better file deep in an unscanned folder for meaningfully faster runs. Shared Drives are always scanned exhaustively regardless of this setting (they're not individually-owned accounts, so the same early-stop logic doesn't apply). Leave it at `0` (the default) for a guaranteed-complete, exhaustive scan.
+**This is a real trade-off, not just a scanning shortcut**: the priority-by-data-volume and cross-account top-up behavior described earlier in this section only applies when `--folders-per-round 0` (the default). With it set, whichever accounts get scanned first can consume the entire Drive budget, later accounts can end up with zero Drive files purely because of scan order, and there's no cross-account top-up for native files — simpler and much faster, at the cost of that fairness/optimality. Use `0` when you want the thorough, globally-fair manifest (e.g. building one to hand off via `--scan-only` for someone else to review); use a real batch size when you need results fast and can live with scan-order deciding who gets included.
 
 ### Output
 
 `out/quality_sample_manifest.json`, containing:
 
-- `"files"` — selected Drive files: binary files under the 75GB cap, plus the Sheets/Docs/Slides quotas (same shape Part 6's script already reads)
+- `"files"` — selected Drive files: binary files under the 15GB cap, plus the Sheets/Docs/Slides quotas (same shape Part 6's script already reads)
 - `"gmail_threads"` — selected Gmail threads, each with its `message_ids` (used by Part 8)
 - `"drive_native_selected"` — how many Sheets/Docs/Slides were actually included (useful if a Workspace has fewer than the quota of a given type)
 
