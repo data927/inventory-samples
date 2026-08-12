@@ -370,7 +370,8 @@ def stress_dwd_share_and_transfer_mocked() -> None:
                 share_dest_with="alice@x",
                 progress_log=lambda m: None,
             )
-            _assert(shared == [("destROOT", "alice@x")], f"share={shared}")
+            _assert(("destROOT", "alice@x") in shared, f"share={shared}")
+            _assert(any(s[0].startswith("child-") for s in shared), f"child share missing: {shared}")
             _assert(created_folders and created_folders[0].startswith("AI Labs Sample Set"),
                     f"created={created_folders}")
             ids = {c[0] for c in copied}
@@ -416,7 +417,7 @@ def stress_dwd_share_and_transfer_mocked() -> None:
             )
             _assert({c[0] for c in copied} == {"a", "b"}, f"full copy={copied}")
             _assert(len(out2) == 2, f"out2={len(out2)}")
-            _assert(shared == [("destROOT", "alice@x")], "should share for full too")
+            _assert(("destROOT", "alice@x") in shared, f"should share root for full too: {shared}")
         finally:
             bqs.walk_my_drive_in_rounds = orig_walk
             bqs._create_root_folder = orig_create
