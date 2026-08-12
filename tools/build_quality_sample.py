@@ -1005,6 +1005,142 @@ def run_streaming_workspace_pipeline(
     return all_drive_selected, all_gmail_selected, native_counts
 
 
+def run_streaming_single_account_drive(
+    service,
+    *,
+    drive_cap_bytes: int,
+    gsheets_per_account: int,
+    gdocs_per_account: int,
+    gslides_per_account: int,
+    folders_per_round: int,
+    modified_before: str | None,
+    folder_name: str,
+    dest_folder_id: str,
+    checkpoint_dir: Path,
+    scan_only: bool,
+    progress_log=_log,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Single-account counterpart to ``run_streaming_workspace_pipeline``'s Drive
+    phase: with only one account there's no "next account" to scan while the current
+    one transfers, so instead each round of ``folders_per_round`` folders is selected
+    and handed off to a background transfer thread while scanning continues into the
+    *next round* of the same account's remaining folders. Same shared running budget
+    across rounds (stops scanning further rounds the instant the cap is used up), same
+    one-writer-thread-per-checkpoint concurrency guarantee as the workspace path.
+    """
+    ckpt = checkpoint_dir / "ai_labs_samples.checkpoint.jsonl"
+    native_counts = {"gsheets": 0, "gdocs": 0, "gslides": 0}
+    all_selected: list[dict[str, Any]] = []
+
+    dest_id = None
+    worker: threading.Thread | None = None
+    work_queue: queue.Queue = queue.Queue()
+
+    if not scan_only:
+        dest_service = build_drive_service(_get_rw_credentials())
+        dest_meta = _load_dest_meta(ckpt)
+        if dest_folder_id.strip():
+            dest_id = normalize_folder_id(dest_folder_id)
+        elif dest_meta and dest_meta.get("dest_folder_id"):
+            dest_id = str(dest_meta["dest_folder_id"])
+            folder_name = str(dest_meta.get("folder_name") or folder_name)
+            progress_log(f"[stream] resuming into existing folder {folder_name!r} → {dest_id}")
+        else:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if folder_name == "AI Labs Sample Set":
+                folder_name = f"{folder_name} ({stamp})"
+            dest_id = _create_root_folder(dest_service, folder_name, parent_id="root")
+            progress_log(f"[stream] created My Drive folder {folder_name!r} → {dest_id}")
+        _save_dest_meta(ckpt, dest_id, folder_name)
+        done = _load_done(ckpt)
+        folder_cache: dict[str, str] = {}
+
+        def _transfer_worker() -> None:
+            # Only this thread ever touches dest_service/done/folder_cache — one
+            # writer, no locking needed.
+            while True:
+                item = work_queue.get()
+                if item is None:
+                    work_queue.task_done()
+                    return
+                round_num, batch = item
+                ok = skip = fail = 0
+                for row in batch:
+                    fid = row["file_id"]
+                    if fid in done:
+                        skip += 1
+                        continue
+                    try:
+                        parent = _ensure_child_folder(dest_service, dest_id, row["owner_email"], folder_cache)
+                        new_id = _drive_copy(dest_service, fid, parent, row["name"])
+                        _append_done(ckpt, {
+                            "file_id": fid, "new_id": new_id, "bucket": row["owner_email"],
+                            "name": row["name"], "path": row["path"], "mode": "copy", "status": "ok",
+                        })
+                        done.add(fid)
+                        ok += 1
+                    except (HttpError, RuntimeError, OSError) as exc:
+                        fail += 1
+                        _append_done(ckpt, {
+                            "file_id": fid, "bucket": row["owner_email"], "name": row["name"],
+                            "path": row["path"], "status": "error", "error": str(exc)[:500],
+                        })
+                        progress_log(f"[stream] FAIL drive {row['name'][:60]!r} — {exc}")
+                progress_log(f"[stream] round {round_num}: transferred ok={ok} skip={skip} fail={fail}")
+                work_queue.task_done()
+
+        worker = threading.Thread(target=_transfer_worker, daemon=True)
+        worker.start()
+
+    drive_remaining = drive_cap_bytes
+    native_selected: dict[str, list[dict[str, Any]]] = {"gsheets": [], "gdocs": [], "gslides": []}
+    frontier = None
+    round_num = 0
+    while True:
+        round_num += 1
+        if drive_remaining <= 0:
+            progress_log(f"[stream] drive cap reached — stopping scan after round {round_num - 1}")
+            break
+
+        batch_rows, frontier = walk_my_drive_in_rounds(
+            service, path_prefix="", frontier=frontier, folder_budget=folders_per_round,
+            modified_before=modified_before, progress_log=progress_log,
+        )
+        batch_buckets = _bucket_drive_rows(batch_rows)
+        binary_selected, binary_total = greedy_fill(batch_buckets["binary"], drive_remaining)
+        round_selected = list(binary_selected)
+        for kind, limit in (("gsheets", gsheets_per_account), ("gdocs", gdocs_per_account),
+                             ("gslides", gslides_per_account)):
+            remaining_quota = limit - len(native_selected[kind])
+            if remaining_quota > 0:
+                picked = select_top_by_recency(batch_buckets[kind], remaining_quota)
+                native_selected[kind].extend(picked)
+                native_counts[kind] += len(picked)
+                round_selected.extend(picked)
+
+        all_selected.extend(round_selected)
+        drive_remaining -= binary_total
+        progress_log(f"[stream] round {round_num}: selected {len(binary_selected)} binary file(s) "
+                     f"({binary_total / GB:.2f}GB) + {len(round_selected) - len(binary_selected)} native file(s), "
+                     f"{drive_remaining / GB:.2f}GB left of the cap, {len(frontier)} folder(s) queued")
+
+        if worker is not None and round_selected:
+            work_queue.put((round_num, round_selected))
+            progress_log(f"[stream] round {round_num}: queued for transfer — continuing to scan the next round")
+
+        if not frontier:
+            progress_log(f"[stream] entire My Drive scanned after {round_num} round(s)")
+            break
+
+    if worker is not None:
+        work_queue.put(None)
+        progress_log("[stream] Drive scanning done — waiting for the transfer queue to drain...")
+        worker.join()
+        progress_log(f"[stream] Drive fully done — folder: https://drive.google.com/drive/folders/{dest_id}")
+
+    return all_selected, native_counts
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--drive-cap-gb", type=float, default=15.0,
@@ -1151,7 +1287,19 @@ def main(argv: list[str] | None = None) -> int:
         drive_selected: list[dict[str, Any]] = []
         drive_total = 0
         native_counts = {"gsheets": 0, "gdocs": 0, "gslides": 0}
-        if not args.skip_drive:
+        if not args.skip_drive and not workspace_mode and args.folders_per_round > 0:
+            drive_selected, native_counts = run_streaming_single_account_drive(
+                my_drive_service(), drive_cap_bytes=drive_cap_bytes,
+                gsheets_per_account=args.gsheets_per_account, gdocs_per_account=args.gdocs_per_account,
+                gslides_per_account=args.gslides_per_account, folders_per_round=args.folders_per_round,
+                modified_before=drive_before, folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,
+                checkpoint_dir=scan_cache_dir, scan_only=args.scan_only, progress_log=_log,
+            )
+            drive_total = sum(r["size_bytes"] for r in drive_selected)
+            _log(f"[drive] streamed: selected {len(drive_selected)} file(s), {drive_total / GB:.2f}GB "
+                 f"/ {args.drive_cap_gb:.2f}GB cap "
+                 f"[streaming mode — already transferred incrementally per round above]")
+        elif not args.skip_drive:
             cache_suffix = f".before_{args.before}" if args.before else ""
             drive_scan_cache = str(scan_cache_dir / (out_path.stem + cache_suffix + ".drive_scan_cache.jsonl"))
             if workspace_mode:
