@@ -226,7 +226,7 @@ python tools/build_quality_sample.py
 
 **Entire account / full-account sample (Drive 5GB + Gmail sample):**
 
-Creates `AI Labs Sample Set (date)` in admin My Drive (DWD), shares with the selected user, copies Drive as-is until **5GB**, then Gmail: first **100** messages → up to **20** threads (discovery order), **3GB** cap.
+Creates `AI Labs Sample Set (date)` in admin My Drive (DWD), shares with the selected user, copies Drive as-is until **5GB** (walk + transfer finish first), then Gmail: first **100** messages → up to **20** threads (discovery order), **3GB** cap. Destination Gmail insert needs the operator's `gmail.insert` OAuth (same as Part 8).
 
 ```
 python tools/build_quality_sample.py --full-account
@@ -296,7 +296,7 @@ python tools/build_quality_sample.py \
 
 **Run — one account, Drive 5GB + Gmail sample (no quality scan)**
 
-Uses **Domain-Wide Delegation**. Creates `AI Labs Sample Set (date)` in the **admin** My Drive (shared with the selected user), copies Drive **as-is until 5GB**, then Gmail sample: first **100** messages → up to **20** threads, **3GB** cap.
+Uses **Domain-Wide Delegation**. Creates `AI Labs Sample Set (date)` in the **admin** My Drive (shared with the selected user), copies Drive **as-is until 5GB** and waits until that transfer finishes, then Gmail sample: first **100** messages → up to **20** threads, **3GB** cap. Gmail insert uses the destination account's OAuth (`gmail.insert` — Part 8).
 
 ```
 python tools/build_quality_sample.py \
