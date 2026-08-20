@@ -19,6 +19,7 @@ from tools.build_quality_sample import (
     allocate_equally_by_account,
     greedy_fill,
     select_native_by_account,
+    select_threads_first_n,
     select_top_by_recency,
     _account_has_enough,
     _drive_rows_all_files,
@@ -280,6 +281,21 @@ def test_take_files_as_is_counts_already_done_toward_cap() -> None:
     assert used == 9 and full is False
 
 
+def test_select_threads_first_n_discovery_order_and_cap() -> None:
+    threads = [{"thread_id": f"t{i}", "size_bytes": 10} for i in range(25)]
+    got = select_threads_first_n(threads, max_threads=20, cap_bytes=10_000)
+    assert [t["thread_id"] for t in got] == [f"t{i}" for i in range(20)]
+
+    # Cap that forces skipping an oversized early thread, then fill later ones
+    small = [
+        {"thread_id": "big", "size_bytes": 900},
+        {"thread_id": "a", "size_bytes": 100},
+        {"thread_id": "b", "size_bytes": 100},
+    ]
+    got2 = select_threads_first_n(small, max_threads=20, cap_bytes=250)
+    assert [t["thread_id"] for t in got2] == ["a", "b"]
+
+
 if __name__ == "__main__":
     test_greedy_fill_backfills_around_oversized_item()
     test_greedy_fill_empty_and_exact_cap()
@@ -299,4 +315,5 @@ if __name__ == "__main__":
     test_drive_rows_all_files_keeps_zero_size_natives()
     test_take_files_as_is_until_cap_walk_order()
     test_take_files_as_is_counts_already_done_toward_cap()
+    test_select_threads_first_n_discovery_order_and_cap()
     print("OK")

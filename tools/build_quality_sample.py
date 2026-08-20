@@ -34,7 +34,7 @@ Usage:
   # Just your own Drive + Gmail (no service account)
   python tools/build_quality_sample.py
 
-  # One account — Drive as-is until 5GB + full Gmail scan/transfer
+  # One account — Drive as-is until 5GB + Gmail (first 100 msgs → 20 threads, 3GB cap)
   python tools/build_quality_sample.py --full-account
   python tools/build_quality_sample.py \\
       --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
@@ -598,6 +598,92 @@ def collect_gmail_candidates(
             if progress_log and i % 500 == 0:
                 progress_log(f"[gmail] {email}: {i}/{len(ids)} message(s) scanned")
     return list(by_thread.values())
+
+
+# --full-account Gmail sample: first N messages → up to M threads, under a byte cap.
+_FULL_ACCOUNT_GMAIL_MAX_MESSAGES = 100
+_FULL_ACCOUNT_GMAIL_MAX_THREADS = 20
+_FULL_ACCOUNT_GMAIL_CAP_GB = 3.0
+
+
+def select_threads_first_n(
+    threads_in_order: list[dict[str, Any]],
+    *,
+    max_threads: int,
+    cap_bytes: int,
+) -> list[dict[str, Any]]:
+    """Take threads in discovery order until ``max_threads`` or the byte cap.
+
+    Oversized threads that don't fit the remaining budget are skipped (same as
+    Drive as-is), so a single huge thread doesn't block filling the sample.
+    """
+    selected: list[dict[str, Any]] = []
+    used = 0
+    for t in threads_in_order:
+        if len(selected) >= max_threads:
+            break
+        size = _int_size(t.get("size_bytes"))
+        if size > 0 and used + size > cap_bytes:
+            continue
+        selected.append(t)
+        used += size
+    return selected
+
+
+def collect_gmail_first_n_sample(
+    *,
+    get_user_service: Callable[[str], Any],
+    email: str,
+    gmail_query: str,
+    scan_cache_dir: Path,
+    cache_suffix: str = "",
+    max_messages: int = _FULL_ACCOUNT_GMAIL_MAX_MESSAGES,
+    max_threads: int = _FULL_ACCOUNT_GMAIL_MAX_THREADS,
+    cap_bytes: int,
+    progress_log=_log,
+) -> list[dict[str, Any]]:
+    """Scan the first ``max_messages`` mailbox messages, group into threads in
+    discovery order, then keep up to ``max_threads`` under ``cap_bytes``.
+
+    Transfer still pulls each selected thread in full (``fetch_thread_raw``);
+    sizes from the partial message window are only used for the sample budget.
+    """
+    svc = get_user_service(email)
+    safe_email = email.replace("@", "_at_")
+    # Dedicated cache name so a prior full-mailbox ID list isn't reused/truncated.
+    cache_path = scan_cache_dir / f"gmail_ids__{safe_email}__fa{max_messages}{cache_suffix}.txt"
+    ids = scan_mailbox(
+        svc, email, query=gmail_query, max_messages=max_messages,
+        progress_log=progress_log, scan_cache_path=str(cache_path),
+    )
+    meta_cache_path = scan_cache_dir / f"gmail_meta__{safe_email}__fa{max_messages}{cache_suffix}.jsonl"
+    meta_cache = _load_message_meta_cache(meta_cache_path)
+    if meta_cache:
+        progress_log(f"[gmail] {email}: resuming from {len(meta_cache)} cached message(s)")
+
+    by_thread: dict[tuple[str, str], dict[str, Any]] = {}
+    discovery_order: list[tuple[str, str]] = []
+    for i, mid in enumerate(ids, start=1):
+        meta = meta_cache.get(mid)
+        if meta is None:
+            meta = fetch_message_meta(svc, mid, user_id=email)
+            _append_message_meta_cache(meta_cache_path, meta)
+        key = (email, meta["thread_id"])
+        if key not in by_thread:
+            discovery_order.append(key)
+        add_to_thread(by_thread, email, meta)
+        if progress_log and i % 50 == 0:
+            progress_log(f"[gmail] {email}: {i}/{len(ids)} message(s) scanned")
+
+    ordered = [by_thread[k] for k in discovery_order]
+    selected = select_threads_first_n(
+        ordered, max_threads=max_threads, cap_bytes=cap_bytes,
+    )
+    progress_log(
+        f"[gmail] {email}: first {len(ids)} message(s) → {len(ordered)} thread(s) seen, "
+        f"selected {len(selected)}/{max_threads} under {cap_bytes / GB:.2f}GB"
+    )
+    return selected
 
 
 def _stream_gmail_account_in_rounds(
@@ -1648,8 +1734,9 @@ def main(argv: list[str] | None = None) -> int:
                          "(space- or comma-separated; skips Admin SDK enumeration entirely)")
     p.add_argument("--full-account", action="store_true",
                     help="One account sample: Drive as-is until --cap-gb (default 5GB), then "
-                         "scan + transfer that user's full Gmail. No quality ranking. "
-                         "My Drive mode: signed-in account. Workspace mode: exactly one --users EMAIL.")
+                         "Gmail sample (first 100 messages → up to 20 threads, 3GB cap). "
+                         "No quality ranking. My Drive mode: signed-in account. "
+                         "Workspace mode: exactly one --users EMAIL.")
     p.add_argument("--as-is", action="store_true",
                     help="Transfer Drive files as-is (walk order) into AI Labs Sample Set — "
                          "no quality scan, Drive only. Stops at --cap-gb (default 40GB). "
@@ -1749,7 +1836,7 @@ def main(argv: list[str] | None = None) -> int:
 
         _log(f"[mode] {mode_label} Drive transfer for {email} "
              f"(as-is until {cap_bytes / GB:.2f}GB"
-             + ("; then Gmail scan+transfer" if args.full_account and not args.skip_gmail else "; Drive only")
+             + ("; then Gmail first-100→20 threads / 3GB" if args.full_account and not args.skip_gmail else "; Drive only")
              + ")")
 
         # Small rounds so the first batch is listed quickly and transfer starts right away.
@@ -1767,7 +1854,12 @@ def main(argv: list[str] | None = None) -> int:
         gmail_selected: list[dict[str, Any]] = []
         gmail_total = 0
         if args.full_account and not args.skip_gmail:
-            _log(f"[gmail] full-account: scanning mailbox for {email}…")
+            gmail_cap_bytes = int(_FULL_ACCOUNT_GMAIL_CAP_GB * GB)
+            _log(
+                f"[gmail] full-account: first {_FULL_ACCOUNT_GMAIL_MAX_MESSAGES} message(s) → "
+                f"up to {_FULL_ACCOUNT_GMAIL_MAX_THREADS} thread(s), "
+                f"cap {gmail_cap_bytes / GB:.2f}GB for {email}…"
+            )
             if workspace_mode:
                 def _gmail_service_for(user: str):
                     creds = get_service_account_credentials(sa_file, user, SCOPES_GMAIL)
@@ -1777,15 +1869,18 @@ def main(argv: list[str] | None = None) -> int:
                 def _gmail_service_for(_user: str):
                     return single_gmail_svc
 
-            gmail_selected = collect_gmail_candidates(
-                get_user_service=_gmail_service_for, users=[email], gmail_query=gmail_query,
+            gmail_selected = collect_gmail_first_n_sample(
+                get_user_service=_gmail_service_for, email=email, gmail_query=gmail_query,
                 scan_cache_dir=scan_cache_dir,
                 cache_suffix=f"__before_{args.before}" if args.before else "",
+                max_messages=_FULL_ACCOUNT_GMAIL_MAX_MESSAGES,
+                max_threads=_FULL_ACCOUNT_GMAIL_MAX_THREADS,
+                cap_bytes=gmail_cap_bytes,
                 progress_log=_log,
             )
             gmail_total = sum(int(r.get("size_bytes") or 0) for r in gmail_selected)
-            _log(f"[gmail] full-account: {len(gmail_selected)} thread(s), "
-                 f"{gmail_total / GB:.2f}GB — transferring all")
+            _log(f"[gmail] full-account: transferring {len(gmail_selected)} thread(s), "
+                 f"{gmail_total / GB:.2f}GB")
             transfer_selection_by_account(
                 [], gmail_selected,
                 folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,

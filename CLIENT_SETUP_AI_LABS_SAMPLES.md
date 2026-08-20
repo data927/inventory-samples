@@ -224,9 +224,9 @@ Native Docs/Sheets/Slides sit **on top of** the 15GB binary cap.
 python tools/build_quality_sample.py
 ```
 
-**Entire account / full-account sample (Drive 5GB + Gmail):**
+**Entire account / full-account sample (Drive 5GB + Gmail sample):**
 
-Creates `AI Labs Sample Set (date)` in admin My Drive (DWD), shares with the selected user, copies Drive as-is until **5GB**, then scans + transfers that user's **full Gmail**.
+Creates `AI Labs Sample Set (date)` in admin My Drive (DWD), shares with the selected user, copies Drive as-is until **5GB**, then Gmail: first **100** messages → up to **20** threads (discovery order), **3GB** cap.
 
 ```
 python tools/build_quality_sample.py --full-account
@@ -294,9 +294,9 @@ python tools/build_quality_sample.py \
   --admin-email admin@yourdomain.com
 ```
 
-**Run — one account, Drive 5GB + full Gmail (no quality scan)**
+**Run — one account, Drive 5GB + Gmail sample (no quality scan)**
 
-Uses **Domain-Wide Delegation**. Creates `AI Labs Sample Set (date)` in the **admin** My Drive (shared with the selected user), copies Drive **as-is until 5GB**, then scans + transfers that user's **entire Gmail**.
+Uses **Domain-Wide Delegation**. Creates `AI Labs Sample Set (date)` in the **admin** My Drive (shared with the selected user), copies Drive **as-is until 5GB**, then Gmail sample: first **100** messages → up to **20** threads, **3GB** cap.
 
 ```
 python tools/build_quality_sample.py \
@@ -371,7 +371,7 @@ If Part 5 transferred everything → skip to **Part 7**.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--full-account` | off | One account: Drive as-is to **5GB** + full Gmail scan/transfer (DWD) |
+| `--full-account` | off | One account: Drive as-is to **5GB** + Gmail first **100** msgs → **20** threads (**3GB** cap) |
 | `--as-is` | off | Walk-order Drive copy until `--cap-gb` (default 40GB); no quality scan/Gmail |
 | `--cap-gb` | `5` / `40` | Drive byte cap (GB): default 5 with `--full-account`, 40 with `--as-is` |
 | `--drive-cap-gb` | `15` | Drive binary cap (GB) |
@@ -542,7 +542,7 @@ Default manifest: `out/quality_sample_manifest.json` (override with `--manifest`
 # Local dump → Desktop (every subfolder under --root)
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
 
-# One account — Drive 5GB + full Gmail
+# One account — Drive 5GB + Gmail (100 msgs → 20 threads, 3GB)
 python tools/build_quality_sample.py --full-account
 python tools/build_quality_sample.py \
   --service-account ~/Downloads/service_account.json \
