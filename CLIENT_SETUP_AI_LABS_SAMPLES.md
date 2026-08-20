@@ -258,33 +258,108 @@ python tools/build_quality_sample.py --as-is --cap-gb 40
 
 ### 5B — Whole Workspace (Service Account + Domain-Wide Delegation)
 
-**Operator — create Service Account**
+Use this for `--full-account`, `--as-is`, or a whole-Workspace quality sample. Two people are involved:
 
-1. [Google Cloud Console](https://console.cloud.google.com/) → project (can reuse Part 3) → **IAM & Admin** → **Service Accounts** → **Create Service Account** → name → **Done**.
-2. Service account → **Keys** → **Add Key** → **Create new key** → **JSON** → save the file.
-3. **Details** → **Advanced settings** → copy **Client ID** → enable Domain-wide delegation if shown.
-4. **APIs & Services** → **Library** → enable **Google Drive API**, **Admin SDK API**, **Gmail API**.
-5. Send only the **Client ID** to the Workspace super-admin (not the JSON key).
+- **Operator** — creates the Google Cloud service account + JSON key (Parts A–C below).
+- **Workspace super-admin** — authorizes Domain-Wide Delegation in Admin Console (Part D).
 
-**Workspace super-admin — authorize**
+---
 
-6. [admin.google.com](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation** → **Add new** → paste Client ID + scopes:
+#### A. Operator — create the Google Cloud project + enable APIs
+
+1. Open **https://console.cloud.google.com/** and sign in.
+2. Top bar → project dropdown → pick the project from Part 3, or **New Project** → name it → **Create** → select it.
+3. Left menu → **APIs & Services** → **Library**.
+4. Search and **Enable** each of these (if not already enabled):
+   - **Google Drive API**
+   - **Admin SDK API**
+   - **Gmail API**
+
+---
+
+#### B. Operator — create the Service Account + JSON key
+
+1. Left menu → **IAM & Admin** → **Service Accounts**.
+2. Click **+ Create Service Account**.
+3. **Service account name** — e.g. `ai-labs-samples` → **Create and Continue**.
+4. **Grant this service account access to project** — skip (click **Continue**). Optional roles are not required for DWD.
+5. **Grant users access** — skip → **Done**.
+6. In the service accounts list, click the new account (email looks like `ai-labs-samples@PROJECT_ID.iam.gserviceaccount.com`).
+7. Open the **Details** tab.
+8. Expand **Advanced settings** (or **Show domain-wide delegation**):
+   - Check **Enable Google Workspace Domain-wide Delegation** if a checkbox is shown.
+   - **Product name for the consent screen** — any name (e.g. `AI Labs Samples`) if asked → **Save**.
+9. Still on **Details**, copy the **Unique ID** / **Client ID** (long **numeric** string, e.g. `123456789012345678901`).
+   - This is the ID the super-admin pastes into Admin Console — **not** the service account email.
+10. Open the **Keys** tab → **Add Key** → **Create new key** → type **JSON** → **Create**.
+11. Save the downloaded file somewhere safe, e.g. `~/Downloads/service_account.json`.
+12. Send the Workspace super-admin **only**:
+    - the **Client ID** (numeric), and
+    - the **exact scopes list** from Part D below.  
+    Do **not** send the JSON key unless they are also the operator.
+
+---
+
+#### C. Operator — (optional) confirm Client ID location
+
+If you lost the Client ID:
+
+1. **IAM & Admin** → **Service Accounts** → click the account.
+2. **Details** → **Unique ID** / **OAuth 2 Client ID** (digits only).
+
+Or: **APIs & Services** → **Credentials** → under **OAuth 2.0 Client IDs**, find the service account’s client → copy **Client ID**.
+
+---
+
+#### D. Workspace super-admin — authorize Domain-Wide Delegation
+
+Must be signed in as a **super admin** of the Google Workspace domain.
+
+1. Open **https://admin.google.com/**.
+2. Left menu → **Security**.
+   - If you don’t see it: click **Show more** / **Directory** areas until **Security** appears (super-admin only).
+3. **Security** → **Access and data control** → **API controls**.
+   - Older UI path: **Security** → **API controls**.
+4. Under **Domain wide delegation**, click **Manage Domain Wide Delegation** (or **Manage domain-wide delegation**).
+5. Click **Add new**.
+6. **Client ID** — paste the **numeric** Client ID from the operator (Part B step 9).
+7. **OAuth scopes** — paste **exactly** this comma-separated list (one line, no spaces after commas is fine; spaces after commas also OK):
 
 ```
 https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/admin.directory.user.readonly,https://www.googleapis.com/auth/gmail.readonly
 ```
 
-→ **Authorise**. Wait 5–10 min if first run fails with `unauthorized_client`.
+Same scopes, one per line for checking:
 
-Use the full `drive` scope (not only `drive.readonly`) so `--full-account` / `--as-is` can create the sample folder in the **super-admin** My Drive and copy via Domain-Wide Delegation with **no personal OAuth browser login**.
+| Scope | Why |
+| --- | --- |
+| `https://www.googleapis.com/auth/drive` | Create sample folder in **admin** My Drive, share it, and copy files as the selected user. **Must be full `drive`, not `drive.readonly`.** |
+| `https://www.googleapis.com/auth/admin.directory.user.readonly` | List Workspace users (whole-domain scan). Not required if you always pass `--users EMAIL`. |
+| `https://www.googleapis.com/auth/gmail.readonly` | Read the selected user’s mailbox for Gmail sample (`--full-account`). |
 
-**Operator — save credentials**
+8. Click **Authorise** (or **Authorize**).
+9. Confirm the new row appears in the Domain-wide delegation list with that Client ID and those scopes.
+10. Wait **5–10 minutes** before the first run. If you see `RefreshError: unauthorized_client` or `unauthorized_client`, wait and retry — scopes often need a few minutes to propagate. Double-check you used **full** `drive` (not `drive.readonly`) and the correct numeric Client ID.
+
+**Editing scopes later:** open the same Client ID row → **Edit** → replace the scopes string → **Authorise** again → wait 5–10 min.
+
+---
+
+#### E. Operator — save Service Account path (optional helper)
 
 ```
 python setup.py
 ```
 
-When asked `Set up Service Account for full workspace scan? (y/n)` → `y` → path to JSON key → Workspace super-admin email (e.g. `admin@yourdomain.com`).
+When asked `Set up Service Account for full workspace scan? (y/n)` → `y` → path to JSON key → Workspace **super-admin** email (e.g. `admin@yourdomain.com`).
+
+You can also pass paths on every command with `--service-account` and `--admin-email` (examples below) without `setup.py`.
+
+**`--admin-email` must be a real super-admin (or admin) user in the domain** — the script impersonates that user to create the sample folder in **their** My Drive, then shares it with `--users`.
+
+---
+
+#### F. Run commands (after DWD is authorized)
 
 **Run — whole Workspace (scan + transfer)**
 
@@ -530,6 +605,9 @@ Default manifest: `out/quality_sample_manifest.json` (override with `--manifest`
 | No `gmail_threads` / Part 8 empty | Re-run Part 5 without `--skip-gmail` |
 | Gmail insert permission error | Add `gmail.insert` scope (Part 8 setup) |
 | Unexpected browser login in Part 5 | Destination OAuth consent (default transfer). Use `--scan-only` to skip |
+| `unauthorized_client` / `RefreshError` with `--service-account` | Super-admin must authorize DWD (Part 5B §D). Use **numeric Client ID**, full `drive` scope (not `drive.readonly`), wait 5–10 min after Authorize |
+| DWD: wrong Client ID | Paste the service account **Unique ID** (digits), not the `...@....iam.gserviceaccount.com` email |
+| DWD: folder create / copy denied | Scopes must include `https://www.googleapis.com/auth/drive` (full). Edit the DWD row and re-authorize |
 | Part 5 didn't re-scan | Manifest already exists — add `--rescan` |
 | Local: `--root not found` | Fix the path to the parent folder |
 | Local: no subfolders | `--root` must contain at least one subfolder |
