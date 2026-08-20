@@ -34,8 +34,7 @@ Usage:
   # Just your own Drive + Gmail (no service account)
   python tools/build_quality_sample.py
 
-  # One account — no quality scan/selection: walk My Drive and transfer everything
-  # into the AI Labs Sample Set folder
+  # One account — Drive as-is until 5GB + full Gmail scan/transfer
   python tools/build_quality_sample.py --full-account
   python tools/build_quality_sample.py \\
       --service-account .secrets/service_account.json --admin-email admin@yourdomain.com \\
@@ -1648,17 +1647,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="Workspace mode only: scan just these users instead of the whole domain "
                          "(space- or comma-separated; skips Admin SDK enumeration entirely)")
     p.add_argument("--full-account", action="store_true",
-                    help="Transfer one account's entire My Drive into the AI Labs Sample Set "
-                         "folder — no quality scan, no byte caps, Drive only (no Gmail). "
-                         "My Drive mode: signed-in account. Workspace mode: pass exactly one "
-                         "--users EMAIL.")
+                    help="One account sample: Drive as-is until --cap-gb (default 5GB), then "
+                         "scan + transfer that user's full Gmail. No quality ranking. "
+                         "My Drive mode: signed-in account. Workspace mode: exactly one --users EMAIL.")
     p.add_argument("--as-is", action="store_true",
                     help="Transfer Drive files as-is (walk order) into AI Labs Sample Set — "
                          "no quality scan, Drive only. Stops at --cap-gb (default 40GB). "
                          "Same account rules as --full-account.")
     p.add_argument("--cap-gb", type=float, default=None, metavar="GB",
-                    help="Byte cap for --as-is / --full-account (GB). Default: 40 with --as-is; "
-                         "unlimited with --full-account alone.")
+                    help="Drive byte cap for --as-is / --full-account (GB). "
+                         "Default: 5 with --full-account, 40 with --as-is.")
     args = p.parse_args(argv)
 
     if args.full_account and args.as_is:
@@ -1701,7 +1699,7 @@ def main(argv: list[str] | None = None) -> int:
     scan_cache_dir = out_path.parent
     scan_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- As-is / full-account Drive transfer (no quality scan / selection / Gmail) ---
+    # --- As-is / full-account transfer (Drive walk+copy; full-account also does Gmail) ---
     if args.full_account or args.as_is:
         mode_label = "full-account" if args.full_account else "as-is"
         if args.scan_only:
@@ -1743,16 +1741,16 @@ def main(argv: list[str] | None = None) -> int:
             share_dest_with = None
 
         if args.full_account:
-            cap_bytes = int(args.cap_gb * GB) if args.cap_gb is not None else None
+            # --full-account: Drive as-is until 5GB (override with --cap-gb)
+            cap_bytes = int((args.cap_gb if args.cap_gb is not None else 5.0) * GB)
         else:
-            # --as-is: default 40GB
+            # --as-is: default 40GB, Drive only
             cap_bytes = int((args.cap_gb if args.cap_gb is not None else 40.0) * GB)
 
-        if cap_bytes is None:
-            _log(f"[mode] {mode_label} Drive transfer for {email} (entire account, no Gmail)")
-        else:
-            _log(f"[mode] {mode_label} Drive transfer for {email} "
-                 f"(as-is until {cap_bytes / GB:.2f}GB, no Gmail)")
+        _log(f"[mode] {mode_label} Drive transfer for {email} "
+             f"(as-is until {cap_bytes / GB:.2f}GB"
+             + ("; then Gmail scan+transfer" if args.full_account and not args.skip_gmail else "; Drive only")
+             + ")")
 
         # Small rounds so the first batch is listed quickly and transfer starts right away.
         folders_per_round = args.folders_per_round if args.folders_per_round > 0 else 50
@@ -1765,21 +1763,53 @@ def main(argv: list[str] | None = None) -> int:
             share_dest_with=share_dest_with, progress_log=_log,
         )
         total_bytes = sum(r.get("size_bytes") or 0 for r in transferred)
+
+        gmail_selected: list[dict[str, Any]] = []
+        gmail_total = 0
+        if args.full_account and not args.skip_gmail:
+            _log(f"[gmail] full-account: scanning mailbox for {email}…")
+            if workspace_mode:
+                def _gmail_service_for(user: str):
+                    creds = get_service_account_credentials(sa_file, user, SCOPES_GMAIL)
+                    return build_gmail_service(creds)
+            else:
+                single_gmail_svc, _my = my_gmail_service()
+                def _gmail_service_for(_user: str):
+                    return single_gmail_svc
+
+            gmail_selected = collect_gmail_candidates(
+                get_user_service=_gmail_service_for, users=[email], gmail_query=gmail_query,
+                scan_cache_dir=scan_cache_dir,
+                cache_suffix=f"__before_{args.before}" if args.before else "",
+                progress_log=_log,
+            )
+            gmail_total = sum(int(r.get("size_bytes") or 0) for r in gmail_selected)
+            _log(f"[gmail] full-account: {len(gmail_selected)} thread(s), "
+                 f"{gmail_total / GB:.2f}GB — transferring all")
+            transfer_selection_by_account(
+                [], gmail_selected,
+                folder_name=args.folder_name, dest_folder_id=args.dest_folder_id,
+                checkpoint_dir=scan_cache_dir, get_source_gmail_service=_gmail_service_for,
+                progress_log=_log,
+            )
+
         manifest = {
             "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "scan_mode": "as_is_drive_transfer" if cap_bytes is not None else "full_account_drive_transfer",
+            "scan_mode": "full_account_drive_gmail" if args.full_account else "as_is_drive_transfer",
             "account": email,
             "cap_bytes": cap_bytes,
             "drive_total_bytes": total_bytes,
+            "gmail_total_bytes": gmail_total,
             "files": [
                 {"file_id": c["file_id"], "name": c["name"], "path": c["path"],
                  "size_bytes": c["size_bytes"], "owner_email": c["owner_email"]}
                 for c in transferred
             ],
-            "gmail_threads": [],
+            "gmail_threads": gmail_selected,
         }
         out_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        _log(f"manifest written: {out_path} (files={len(transferred)}, {total_bytes / GB:.2f}GB)")
+        _log(f"manifest written: {out_path} (files={len(transferred)}, "
+             f"drive={total_bytes / GB:.2f}GB, gmail_threads={len(gmail_selected)})")
         return 0
 
     drive_cap_bytes = int(args.drive_cap_gb * GB)

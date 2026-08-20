@@ -224,12 +224,22 @@ Native Docs/Sheets/Slides sit **on top of** the 15GB binary cap.
 python tools/build_quality_sample.py
 ```
 
-**Entire account — Drive only (no quality scan, no caps, no Gmail):**
+**Entire account / full-account sample (Drive 5GB + Gmail):**
 
-Creates `AI Labs Sample Set (date)` in your My Drive and starts copying **immediately** — first folders are listed, then transfer runs in the background while the rest of the Drive is walked. Copies **every** file from the signed-in account.
+Creates `AI Labs Sample Set (date)` in admin My Drive (DWD), shares with the selected user, copies Drive as-is until **5GB**, then scans + transfers that user's **full Gmail**.
 
 ```
 python tools/build_quality_sample.py --full-account
+```
+
+Workspace:
+
+```
+python tools/build_quality_sample.py \
+  --service-account ~/Downloads/service_account.json \
+  --admin-email admin@yourdomain.com \
+  --users alice@yourdomain.com \
+  --full-account
 ```
 
 **As-is until 40GB (no quality scan):**
@@ -284,9 +294,9 @@ python tools/build_quality_sample.py \
   --admin-email admin@yourdomain.com
 ```
 
-**Run — one account, entire My Drive (transfer only, no quality scan)**
+**Run — one account, Drive 5GB + full Gmail (no quality scan)**
 
-Uses **Domain-Wide Delegation only** (service account + super-admin). Creates `AI Labs Sample Set (date)` in the **admin** My Drive and starts copying immediately. No personal OAuth login, no Gmail.
+Uses **Domain-Wide Delegation**. Creates `AI Labs Sample Set (date)` in the **admin** My Drive (shared with the selected user), copies Drive **as-is until 5GB**, then scans + transfers that user's **entire Gmail**.
 
 ```
 python tools/build_quality_sample.py \
@@ -361,9 +371,9 @@ If Part 5 transferred everything → skip to **Part 7**.
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--full-account` | off | Entire My Drive of one account → AI Labs Sample Set (no quality scan/caps/Gmail) |
+| `--full-account` | off | One account: Drive as-is to **5GB** + full Gmail scan/transfer (DWD) |
 | `--as-is` | off | Walk-order Drive copy until `--cap-gb` (default 40GB); no quality scan/Gmail |
-| `--cap-gb` | `10` with `--as-is` | Byte cap (GB) for `--as-is` / optional trim for `--full-account` |
+| `--cap-gb` | `5` / `40` | Drive byte cap (GB): default 5 with `--full-account`, 40 with `--as-is` |
 | `--drive-cap-gb` | `15` | Drive binary cap (GB) |
 | `--gmail-cap-gb` | `12.5` | Gmail cap (GB) |
 | `--gsheets-limit` | `350` | Google Sheets count |
@@ -532,7 +542,7 @@ Default manifest: `out/quality_sample_manifest.json` (override with `--manifest`
 # Local dump → Desktop (every subfolder under --root)
 python tools/build_quality_sample_local.py --root ~/Downloads/company-dump
 
-# One account — entire My Drive → AI Labs Sample Set (no quality scan)
+# One account — Drive 5GB + full Gmail
 python tools/build_quality_sample.py --full-account
 python tools/build_quality_sample.py \
   --service-account ~/Downloads/service_account.json \
